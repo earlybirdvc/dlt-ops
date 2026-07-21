@@ -78,14 +78,14 @@ POSTGRES_URL=postgresql://user:pass@localhost:5432/db uv run --no-sync pytest -m
 | `integration` | `pytest -m integration` with a `postgres:18-alpine` service container and `POSTGRES_URL` set | required |
 | `test-dlt-latest` | the suite against the newest dlt on PyPI | non-blocking |
 | `test-airflow` | the Airflow-adapter tests with the `[airflow]` extra | non-blocking |
-| `test-windows` | `pytest -m "not integration"` on Windows | non-blocking |
+| `test-windows` | `pytest -m "not integration"` on Windows | required |
 | `integration-bigquery` | `pytest -m integration` with BigQuery credentials | non-blocking |
 
 Notes worth knowing:
 
 - Each `test` matrix cell syncs the locked env, then `uv pip install "dlt~=X.Y.0"` for its matrix dlt minor, then `uv run --no-sync pytest` — the `--no-sync` is what keeps that hand-installed dlt from being reverted. In this lane the two Postgres legs of the triangle self-skip (no psycopg2), but the core-tier `TestDuckDBToFilesystem` leg and the E2E example suite run in every one of the 9 cells; the `integration` job is where the Postgres legs actually execute against live Postgres.
 - `test-dlt-latest` is an early-warning lane: the dlt dependency is floor-only, so PyPI can run ahead of the verified matrix. A red run here means the next dlt minor needs the state-schema diff and matrix extension (below) before it is trusted — it does not block your PR.
-- `test-windows` is non-blocking until it has a green history on `main`, then flips to required; the package does filesystem discovery, so path-semantics is its risk profile.
+- `test-windows` is required: the package does filesystem discovery and writes text files, so path semantics and the locale-default encoding (cp1252, not UTF-8) are its risk profile.
 - `integration-bigquery` skips cleanly when the `BQ_SERVICE_ACCOUNT_JSON` secret is absent (forks have none), so it never fails a fork PR.
 - Python 3.14 is deliberately out of the matrix: the floor dlt minor (1.27) stops declaring support at 3.13 while newer minors declare 3.14, so 3.14 joins when the floor moves.
 

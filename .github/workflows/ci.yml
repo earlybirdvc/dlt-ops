@@ -1,8 +1,8 @@
-# Branch-protection expectation: `lint`, `typecheck`, `guards`,
-# `pr-title`, every `test` matrix cell (DuckDB lane, 3 Pythons x dlt minors
-# from ci/dlt-versions.txt), and `integration` are REQUIRED checks on main.
-# `test-airflow`, `test-windows`, `test-dlt-latest`, and `integration-bigquery`
-# are non-blocking (continue-on-error).
+# Branch-protection expectation: `lint`, `typecheck`, `guards`, `pr-title`,
+# every `test` matrix cell (DuckDB lane, 3 Pythons x dlt minors from
+# ci/dlt-versions.txt), `integration`, and `test-windows` are REQUIRED checks
+# on main. `test-airflow`, `test-dlt-latest`, and `integration-bigquery` are
+# non-blocking (continue-on-error).
 # Python 3.14 is not in the test matrix: dlt 1.27 (latest patch 1.27.2) stops
 # declaring support at 3.13 (trove classifiers); 1.28/1.29 do declare 3.14.
 name: CI
@@ -176,12 +176,10 @@ jobs:
       - run: uv run --no-sync python -c "import airflow; print('airflow', airflow.__version__)"
       - run: uv run --no-sync pytest tests/test_airflow_runtime.py tests/test_orchestration.py
 
-  # Windows lane: the package does filesystem discovery, so path-semantics
-  # bugs are its risk profile. Non-blocking until it has a green history on
-  # main, then flips to required.
+  # Windows lane: the package does filesystem discovery and writes text files,
+  # so path semantics and the locale-default encoding are its risk profile.
   test-windows:
     runs-on: windows-latest
-    continue-on-error: true
     permissions:
       contents: read
     steps:
