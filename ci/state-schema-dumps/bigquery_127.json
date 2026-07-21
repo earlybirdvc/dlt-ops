@@ -1,0 +1,262 @@
+{
+  "checks": {
+    "engine_version_column": [
+      4
+    ],
+    "load_id_ordering": {
+      "inserted_at_monotonic_with_load_id": true,
+      "lexicographic_equals_numeric": true,
+      "load_ids": [
+        "1784012293.3030899",
+        "1784012311.458316"
+      ]
+    },
+    "state_codec": [
+      {
+        "_state_engine_version": 4,
+        "_state_version": 1,
+        "format": "zlib+b64",
+        "sources_resources": {
+          "spike_src": [
+            "events"
+          ]
+        },
+        "top_level_keys": [
+          "_state_engine_version",
+          "_state_version",
+          "_version_hash",
+          "dataset_name",
+          "default_schema_name",
+          "destination_name",
+          "destination_type",
+          "pipeline_name",
+          "schema_names",
+          "sources"
+        ]
+      },
+      {
+        "_state_engine_version": 4,
+        "_state_version": 2,
+        "format": "zlib+b64",
+        "sources_resources": {
+          "spike_src": [
+            "events"
+          ]
+        },
+        "top_level_keys": [
+          "_state_engine_version",
+          "_state_version",
+          "_version_hash",
+          "dataset_name",
+          "default_schema_name",
+          "destination_name",
+          "destination_type",
+          "pipeline_name",
+          "schema_names",
+          "sources"
+        ]
+      }
+    ],
+    "status_domain": [
+      0
+    ],
+    "version_schema_codec": [
+      {
+        "format": "raw-json",
+        "schema_engine_version": 11,
+        "tables_with_resource": {
+          "dims": "dims",
+          "events": "events"
+        }
+      }
+    ]
+  },
+  "columns": {
+    "_dlt_loads": [
+      {
+        "name": "load_id",
+        "nullable": "NO",
+        "type": "STRING(64)"
+      },
+      {
+        "name": "schema_name",
+        "nullable": "YES",
+        "type": "STRING"
+      },
+      {
+        "name": "status",
+        "nullable": "NO",
+        "type": "INT64"
+      },
+      {
+        "name": "inserted_at",
+        "nullable": "NO",
+        "type": "TIMESTAMP"
+      },
+      {
+        "name": "schema_version_hash",
+        "nullable": "YES",
+        "type": "STRING"
+      }
+    ],
+    "_dlt_pipeline_state": [
+      {
+        "name": "version",
+        "nullable": "NO",
+        "type": "INT64"
+      },
+      {
+        "name": "engine_version",
+        "nullable": "NO",
+        "type": "INT64"
+      },
+      {
+        "name": "pipeline_name",
+        "nullable": "NO",
+        "type": "STRING"
+      },
+      {
+        "name": "state",
+        "nullable": "NO",
+        "type": "STRING"
+      },
+      {
+        "name": "created_at",
+        "nullable": "NO",
+        "type": "TIMESTAMP"
+      },
+      {
+        "name": "version_hash",
+        "nullable": "YES",
+        "type": "STRING"
+      },
+      {
+        "name": "_dlt_load_id",
+        "nullable": "NO",
+        "type": "STRING(64)"
+      },
+      {
+        "name": "_dlt_id",
+        "nullable": "NO",
+        "type": "STRING"
+      }
+    ],
+    "_dlt_version": [
+      {
+        "name": "version",
+        "nullable": "NO",
+        "type": "INT64"
+      },
+      {
+        "name": "engine_version",
+        "nullable": "NO",
+        "type": "INT64"
+      },
+      {
+        "name": "inserted_at",
+        "nullable": "NO",
+        "type": "TIMESTAMP"
+      },
+      {
+        "name": "schema_name",
+        "nullable": "NO",
+        "type": "STRING"
+      },
+      {
+        "name": "version_hash",
+        "nullable": "NO",
+        "type": "STRING"
+      },
+      {
+        "name": "schema",
+        "nullable": "NO",
+        "type": "STRING"
+      }
+    ]
+  },
+  "dataset": "dltx_spike_1784012289_127",
+  "destination": "bigquery",
+  "dlt_version": "1.27.2",
+  "generated_at": "2026-07-14T06:58:41.239403+00:00",
+  "rows": {
+    "_dlt_loads": {
+      "columns": [
+        "load_id",
+        "schema_name",
+        "status",
+        "inserted_at",
+        "schema_version_hash"
+      ],
+      "rows": [
+        {
+          "inserted_at": "2026-07-14 06:58:29.755727+00:00",
+          "load_id": "1784012293.3030899",
+          "schema_name": "spike_src",
+          "schema_version_hash": "0Xg7Wa4PAFqAr02yhxJdV2X9EkvEfh55oNGT8TgL8rs=",
+          "status": 0
+        },
+        {
+          "inserted_at": "2026-07-14 06:58:39.537174+00:00",
+          "load_id": "1784012311.458316",
+          "schema_name": "spike_src",
+          "schema_version_hash": "0Xg7Wa4PAFqAr02yhxJdV2X9EkvEfh55oNGT8TgL8rs=",
+          "status": 0
+        }
+      ]
+    },
+    "_dlt_pipeline_state": {
+      "columns": [
+        "version",
+        "engine_version",
+        "pipeline_name",
+        "state",
+        "created_at",
+        "version_hash",
+        "_dlt_load_id",
+        "_dlt_id"
+      ],
+      "rows": [
+        {
+          "_dlt_id": "v79sXEMqXF1VBA",
+          "_dlt_load_id": "1784012293.3030899",
+          "created_at": "2026-07-14 06:58:13.355999+00:00",
+          "engine_version": 4,
+          "pipeline_name": "dltx_spike",
+          "state": "<388 chars> eNplUcFuwjAM/ZdcVyGKWKFIO6wbHWhMghsCTVFWXGotDV3s...",
+          "version": 1,
+          "version_hash": "lp6ft1LZPXfs66zZPBBQKuELi9DB+FFFMCm69BreiGI="
+        },
+        {
+          "_dlt_id": "fA3MLCVYzAJMyw",
+          "_dlt_load_id": "1784012311.458316",
+          "created_at": "2026-07-14 06:58:31.537572+00:00",
+          "engine_version": 4,
+          "pipeline_name": "dltx_spike",
+          "state": "<388 chars> eNplUcFuwjAM/ZecEZAKaIe0AxMSt6rTOnaYpshtDURL05I4...",
+          "version": 2,
+          "version_hash": "PlaAuT0TQP6b12iwz7fo15ANBmGVi//7TmV8NcWr21g="
+        }
+      ]
+    },
+    "_dlt_version": {
+      "columns": [
+        "version",
+        "engine_version",
+        "inserted_at",
+        "schema_name",
+        "version_hash",
+        "schema"
+      ],
+      "rows": [
+        {
+          "engine_version": 11,
+          "inserted_at": "2026-07-14 06:58:20.701924+00:00",
+          "schema": "<3382 chars> {\"version\":2,\"version_hash\":\"0Xg7Wa4PAFqAr02yhxJ...",
+          "schema_name": "spike_src",
+          "version": 2,
+          "version_hash": "0Xg7Wa4PAFqAr02yhxJdV2X9EkvEfh55oNGT8TgL8rs="
+        }
+      ]
+    }
+  }
+}

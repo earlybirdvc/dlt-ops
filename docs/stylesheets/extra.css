@@ -1,0 +1,14 @@
+/* Ledger green — the one brand accent (deep accounting-ledger green). */
+:root {
+  --md-primary-fg-color: #047857;
+  --md-primary-fg-color--light: #059669;
+  --md-primary-fg-color--dark: #065f46;
+  --md-accent-fg-color: #059669;
+  --md-accent-fg-color--transparent: #05966910;
+}
+
+/* Dark scheme: lift the accent so links/hovers stay readable on slate. */
+[data-md-color-scheme="slate"] {
+  --md-typeset-a-color: #10b981;
+  --md-accent-fg-color: #34d399;
+}

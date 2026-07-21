@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+
+# Packaging
+build/
+dist/
+*.egg-info/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.cache/
+.coverage
+htmlcov/
+
+# Docs build output (GH Pages deploys from the docs.yml artifact)
+site/
+
+# dlt
+.dlt/secrets.toml
+*.duckdb
+*.wal
+
+# IDEs / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Local-only real-destination test lane — references live creds/buckets, never published
+tests/real_tests/

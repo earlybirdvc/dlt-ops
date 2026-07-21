@@ -1,0 +1,10 @@
+# Build-context filter for tapes/Dockerfile (BuildKit per-Dockerfile ignore).
+# The image only needs the lockfile, package source, and the entrypoint.
+*
+!.python-version
+!pyproject.toml
+!uv.lock
+!LICENSE
+!dlt_ops
+!tapes/entrypoint.sh
+dlt_ops/**/__pycache__

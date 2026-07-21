@@ -1,0 +1,56 @@
+# Docs site: strict build gates every PR (mkdocstrings imports the package, so
+# code changes can break the build too — no paths filter on purpose); pushes to
+# main deploy to GitHub Pages. One-time setup: repo Settings → Pages → Source =
+# "GitHub Actions".
+name: Docs
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      # Social-cards plugin: cairosvg dlopens libcairo at runtime; the Python side
+      # (pillow, cffi) installs from wheels, so no -dev packages are needed.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libcairo2
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+      - run: uv sync --locked --group docs
+      - run: uv run --no-sync mkdocs build --strict
+        env:
+          # YAML-bool string: mkdocs' !ENV resolves "1" to int, failing the
+          # plugin's bool-typed `enabled` option.
+          SOCIAL_CARDS: "true"
+      - if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site/
+
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
