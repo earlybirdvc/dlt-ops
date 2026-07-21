@@ -346,10 +346,10 @@ def validate_incremental_cursor_required(ctx: ValidationContext) -> list[Validat
     can prove. Turn it on with ``[dlt_ops.rules] incremental_cursor_required =
     true``.
 
-    Error, not warning, when it is on: ``validate_sources`` drops every warning
-    outside ``--strict``, so a warning here would be invisible in the run that
-    matters and a hard failure in the one that doesn't. There is no
-    visible-but-non-blocking severity to reach for.
+    Error, not warning, when it is on: a warning renders but never fails a run
+    outside ``--strict``, so a project that deliberately switched the rule on
+    would buy visibility and no gate. Opting in is the decision; enforcing it
+    is the point.
 
     Scoped to sources whose config declares a recurring schedule, because the
     harm is a full refresh repeating on a cadence; ``@manual`` sources and

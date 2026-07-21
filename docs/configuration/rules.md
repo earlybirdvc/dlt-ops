@@ -60,7 +60,7 @@ stale_sources = false                        # off project-wide
 pydantic_columns_required = "third-party generator yields untyped rows"   # off for one source
 ```
 
-Findings are errors unless tagged **warning** below. Warnings are only ever rendered by `validate --strict`, which is also the only mode in which they fail the command — a default `validate` run filters them out before printing, so a project whose sole findings are warnings prints `✓ All sources validated successfully` and exits 0. Run `--strict` when you want to see them; that is what the rules tagged warning below are worth in practice.
+Findings are errors unless tagged **warning** below. Every run renders both kinds; the difference is the exit code. A plain `validate` fails only on errors, so a project whose sole findings are warnings prints them and still exits 0. `validate --strict` promotes warnings to errors — same messages, rendered as errors — and exits 1. Reach for `--strict` when a warning should block CI.
 
 ## Rule catalog
 
@@ -145,7 +145,7 @@ All three ride this path rather than the rule framework for the same reason: a r
 
 *Tier 1 (`validate`) · warning.*
 
-**A `[sources.<X>]` section with no matching discovered source is flagged** — usually a leftover from a deleted source or a typo'd section name. Known dlt-native sections (`data_writer`, `normalize`, `load`, `extract`) are excluded. Being a warning, it appears only under `validate --strict`.
+**A `[sources.<X>]` section with no matching discovered source is flagged** — usually a leftover from a deleted source or a typo'd section name. Known dlt-native sections (`data_writer`, `normalize`, `load`, `extract`) are excluded. Being a warning, it prints in every run but fails the command only under `validate --strict`.
 
 ### `no_resource_overlap`
 
@@ -221,7 +221,7 @@ Three details govern what it flags:
 
 - **Scoped to recurring schedules.** The harm is a full refresh repeating on a cadence, so `@manual` sources and sources with no parsed config are out of scope.
 - **It reads the live resource, not the source text.** `apply_hints(incremental=...)` and factory-built cursors are invisible to an AST scan, and a false "no cursor" would be worse than the gap it closes. That means the rule needs the source to import — a source excluded from Phase 2 is reported by `validation_coverage` instead.
-- **Error, not warning, when it is on.** Warnings are filtered out of every non-`--strict` run, so a warning here would be invisible in exactly the run that matters.
+- **Error, not warning, when it is on.** A warning never fails a run outside `--strict`, so a project that deliberately switched this rule on would buy visibility and no gate.
 
 Exemptions are per source, so a source that deliberately mixes incremental and full-refresh resources exempts all of them together, with the reason recorded:
 
@@ -254,7 +254,7 @@ Checkpoint engagement is detected by the Phase-1 **AST scan**: `@with_checkpoint
 
 *Tier 1 (`validate`) · warning.*
 
-**A source with run history in the `_dlt_ops_runs` ledger whose last run started more than `staleness_days` ago (default 7) is flagged as ingested-then-orphaned.** Sources with zero history are skipped — they have nothing to be stale relative to. Degrades gracefully: without destination access (unresolved destination, unreachable ledger) the rule stays quiet, so `validate` never requires credentials. Being a warning, its findings appear only under `validate --strict` — that is the invocation to schedule if you want staleness reported.
+**A source with run history in the `_dlt_ops_runs` ledger whose last run started more than `staleness_days` ago (default 7) is flagged as ingested-then-orphaned.** Sources with zero history are skipped — they have nothing to be stale relative to. Degrades gracefully: without destination access (unresolved destination, unreachable ledger) the rule stays quiet, so `validate` never requires credentials. Being a warning, its findings print in every run without failing it — schedule `validate --strict` if you want staleness to block instead.
 
 ### `assertion_config_valid`
 

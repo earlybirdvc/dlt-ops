@@ -228,9 +228,9 @@ jobs:
       - run: uv tool install "dlt-ops[postgres]" # pick the extra your destination needs
 
       # Credential-free by design: validate never opens the destination.
-      # Plain validate is the pass/fail gate. Warnings — orphan config
-      # sections, staleness, core-tier notices — are filtered out of this
-      # form entirely; add --strict to a separate step to see or enforce them.
+      # Plain validate is the pass/fail gate: warnings — orphan config
+      # sections, staleness, core-tier notices — print into the job log
+      # without failing it. Use --strict to make them fail the step too.
       - run: dlt-ops pipeline validate
 
       - run: dlt-ops pipeline run -s "${{ matrix.source }}" -y

@@ -38,6 +38,7 @@ from typing import Any
 
 import dlt
 from dlt.common.configuration.container import Container
+from dlt.common.configuration.providers import EnvironProvider
 from dlt.extract.incremental.context import TimeIntervalContext
 from dlt.extract.items_transform import MapItem
 
@@ -69,8 +70,9 @@ logger = logging.getLogger(__name__)
 LOG_SEPARATOR = "=" * 60
 
 # Destinations whose runs count as the local dev loop and get _LOCAL_DEFAULTS.
-# DuckDB is the sanctioned universal dev-loop destination; orchestrated
-# destinations keep the values from .dlt/config.toml.
+# DuckDB is the sanctioned universal dev-loop destination; on every other
+# destination no default is written and only an explicit flag touches the
+# worker keys at all.
 #
 # A per-provider constant, and the package's rule says those belong in config or
 # capabilities. Neither takes it today, and the reasons are worth recording so
@@ -89,21 +91,50 @@ LOG_SEPARATOR = "=" * 60
 #   config._KNOWN_PROJECT_KEYS or validate reports it as a typo.
 _LOCAL_DESTINATIONS = frozenset({"duckdb"})
 
+# Keyed by dlt config key, not by env-var name: the key is what the lookup
+# below asks the provider chain about, and the env-var spelling is derived
+# from it by dlt's own EnvironProvider rather than spelled twice.
 _LOCAL_DEFAULTS = {
-    "NORMALIZE__WORKERS": "4",
-    "LOAD__WORKERS": "3",
+    "normalize.workers": "4",
+    "load.workers": "3",
 }
 
 
-def _set_env_override(env_var: str, value: int | None, label: str, is_local: bool) -> None:
-    """Set env var with value or local default."""
+def _env_var_name(config_key: str) -> str:
+    """dlt's env-var spelling of a dotted config key (``normalize.workers`` -> ``NORMALIZE__WORKERS``)."""
+    *sections, key = config_key.split(".")
+    return EnvironProvider.get_key_name(key, *sections)
+
+
+def _set_env_override(config_key: str, value: int | None, label: str, is_local: bool) -> None:
+    """Write ``config_key`` to the environment as an explicit override or a local default.
+
+    Environment variables are the highest-precedence provider in dlt's config
+    chain, so a value written here outranks the project's own
+    ``.dlt/config.toml``. That is exactly what an explicit flag should do, and
+    exactly what a default must not: the local default applies only when the
+    key resolves from no provider at all. ``dlt.config.get`` asks the same
+    provider chain, in the same run context, that the pipeline built a few
+    lines later resolves against, so what is seen here is what the run gets.
+    An absent key resolves to None without raising or logging.
+    """
+    env_var = _env_var_name(config_key)
     if value is not None:
         os.environ[env_var] = str(value)
         logger.info(f"{label}: {value}")
-    elif is_local and env_var in _LOCAL_DEFAULTS:
-        default = _LOCAL_DEFAULTS[env_var]
-        os.environ.setdefault(env_var, default)
-        logger.info(f"{label}: {default} (local default)")
+        return
+    if not (is_local and config_key in _LOCAL_DEFAULTS):
+        return
+    configured = dlt.config.get(config_key)
+    if configured is not None:
+        logger.info(f"{label}: {configured} (configured, local default not applied)")
+        return
+    default = _LOCAL_DEFAULTS[config_key]
+    # setdefault, not assignment: dlt's provider chain is pluggable, so a run
+    # context that drops EnvironProvider would hide an exported value from the
+    # lookup above. The environment still wins over a default either way.
+    os.environ.setdefault(env_var, default)
+    logger.info(f"{label}: {default} (local default)")
 
 
 def apply_dlt_overrides(
@@ -114,13 +145,13 @@ def apply_dlt_overrides(
 ) -> None:
     """Apply dlt config overrides via environment variables.
 
-    Documented dlt-native env passthrough for worker tuning: local (dev-loop)
-    runs can increase normalize workers and file sizes while orchestrated runs
-    keep conservative defaults in config.toml.
+    Documented dlt-native env passthrough for worker tuning: an explicit flag
+    wins over every provider, and local (dev-loop) runs fall back to a higher
+    worker count only where the project configured none.
     """
-    _set_env_override("NORMALIZE__WORKERS", normalize_workers, "Normalize workers", is_local)
-    _set_env_override("LOAD__WORKERS", load_workers, "Load workers", is_local)
-    _set_env_override("NORMALIZE__DATA_WRITER__FILE_MAX_ITEMS", file_max_items, "File max items", is_local)
+    _set_env_override("normalize.workers", normalize_workers, "Normalize workers", is_local)
+    _set_env_override("load.workers", load_workers, "Load workers", is_local)
+    _set_env_override("normalize.data_writer.file_max_items", file_max_items, "File max items", is_local)
 
 
 def _log_section(title: str, content: Any) -> None:

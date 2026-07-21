@@ -1,6 +1,7 @@
 """Validator-framework tests: rule registry, resolution, exemptions, plugin groups, CLI."""
 
 import importlib.metadata
+import json
 import tomllib
 import types
 from pathlib import Path
@@ -518,7 +519,7 @@ class TestPluginValidatorGroup:
                 url = "https://example.test"
             """
         )
-        errors = validate_sources(root, strict=True)
+        errors = validate_sources(root)
         assert any(e.field == "config_section" and e.is_warning for e in errors)
 
 
@@ -544,8 +545,8 @@ class TestRuleProviderFailuresSurface:
         assert "provider exploded" in reported[0].message
 
     def test_provider_failure_is_an_error_not_a_filtered_warning(self, extra_entry_points, make_project):
-        """Warnings are dropped from every non-`--strict` run, so a warning here
-        would be invisible in exactly the run this must not pass silently."""
+        """A warning never fails a non-`--strict` run, so a warning here would
+        let exactly the run this must gate exit 0."""
         extra_entry_points("validators", "acme_rules", self.EXPLODING, "acme-rules-dist")
         reported = self._provider_errors(validate_sources(make_project(), strict=False))
 
@@ -668,36 +669,75 @@ class TestShowResolvedRules:
         assert not (root / "probe" / "source" / "canary.txt").exists()
 
 
-class TestValidateCliStrict:
-    """--strict must fail on warnings — the import-failure bypass closes via the orphan warning."""
+class TestValidateWarningSeverity:
+    """Warnings always render; --strict is what makes them fail the run.
 
-    # Config section with no matching source -> orphan warning. This is what a
-    # source whose module fails to import looks like: discovery drops it, only
-    # the orphan section remains.
-    CONFIG = """
+    Also the import-failure bypass: a source whose module fails to import is
+    dropped by discovery, and the orphan warning is what remains of it — so a
+    plain run has to show it and --strict has to fail on it.
+    """
+
+    # Config section with no matching source -> orphan warning.
+    WARNING_ONLY = """
         [dlt_ops]
 
         [sources.ghost_api]
         base_url = "https://example.test"
     """
+    # Unknown rule id in [dlt_ops.rules] -> a plain error, no source files needed.
+    ERROR_ONLY = """
+        [dlt_ops]
 
-    def test_strict_keeps_warnings(self, make_project):
-        errors = validate_sources(make_project(config=self.CONFIG), strict=True)
-        assert any(e.is_warning and "Orphan" in e.message for e in errors)
+        [dlt_ops.rules]
+        bogus_rule = false
+    """
 
-    def test_non_strict_filters_warnings(self, make_project):
-        assert validate_sources(make_project(config=self.CONFIG), strict=False) == []
+    def _validate(self, root: Path, *args: str):
+        return CliRunner().invoke(cli, ["--root", str(root), "pipeline", "validate", *args])
 
-    def test_cli_strict_exits_nonzero_on_warning(self, make_project):
-        root = make_project(config=self.CONFIG)
-        result = CliRunner().invoke(cli, ["--root", str(root), "pipeline", "validate", "--strict"])
+    def _findings_json(self, output: str) -> list[dict[str, Any]]:
+        """The whole of stdout is the --json payload — nothing may precede the document."""
+        return json.loads(output)
+
+    def test_plain_run_returns_the_warning(self, make_project):
+        errors = validate_sources(make_project(config=self.WARNING_ONLY))
+        assert [(e.field, e.is_warning) for e in errors] == [("config_section", True)]
+        assert "Orphan" in errors[0].message
+
+    def test_strict_promotes_the_warning_to_an_error(self, make_project):
+        errors = validate_sources(make_project(config=self.WARNING_ONLY), strict=True)
+        assert [(e.field, e.is_warning) for e in errors] == [("config_section", False)]
+        assert "Orphan" in errors[0].message
+
+    def test_cli_renders_the_warning_and_exits_zero(self, make_project):
+        result = self._validate(make_project(config=self.WARNING_ONLY))
+        assert result.exit_code == 0, result.output
+        assert "1 warning(s)" in result.output
+        assert "Orphan config section" in result.output
+
+    def test_cli_strict_renders_the_warning_as_an_error_and_exits_one(self, make_project):
+        result = self._validate(make_project(config=self.WARNING_ONLY), "--strict")
         assert result.exit_code == 1
-        assert "warnings treated as errors" in result.output
+        assert "1 error(s)" in result.output
+        assert "Orphan config section" in result.output
+        assert "warning(s)" not in result.output
 
-    def test_cli_non_strict_exits_zero_on_warning(self, make_project):
-        root = make_project(config=self.CONFIG)
-        result = CliRunner().invoke(cli, ["--root", str(root), "pipeline", "validate"])
-        assert result.exit_code == 0
+    @pytest.mark.parametrize("extra_args", [(), ("--strict",)])
+    def test_cli_error_exits_nonzero_in_both_modes(self, make_project, extra_args):
+        result = self._validate(make_project(config=self.ERROR_ONLY), *extra_args)
+        assert result.exit_code == 1, result.output
+        assert "1 error(s)" in result.output
+        assert "bogus_rule" in result.output
+
+    def test_json_flags_the_warning_and_exits_zero(self, make_project):
+        result = self._validate(make_project(config=self.WARNING_ONLY), "--json")
+        assert result.exit_code == 0, result.output
+        assert [f["is_warning"] for f in self._findings_json(result.output)] == [True]
+
+    def test_json_strict_flags_the_promoted_warning_as_an_error(self, make_project):
+        result = self._validate(make_project(config=self.WARNING_ONLY), "--strict", "--json")
+        assert result.exit_code == 1
+        assert [f["is_warning"] for f in self._findings_json(result.output)] == [False]
 
 
 class TestValidatorProtocol:
@@ -1088,13 +1128,16 @@ class TestDestinationCapabilityEndToEnd:
         schedule = "@daily"
     """
 
-    def test_core_tier_warning_kept_in_strict_filtered_otherwise(self, make_project):
+    def test_core_tier_notice_is_a_warning_plainly_and_an_error_under_strict(self, make_project):
         root = make_project(config=self.CORE_TIER_CONFIG, files=self.FILES)
+        plain = [e for e in validate_sources(root) if e.field == "destination"]
+        assert len(plain) == 1
+        assert plain[0].is_warning
+        assert "core mode" in plain[0].message
+
         strict = [e for e in validate_sources(root, strict=True) if e.field == "destination"]
-        assert len(strict) == 1
-        assert strict[0].is_warning
-        assert "core mode" in strict[0].message
-        assert [e for e in validate_sources(root) if e.field == "destination"] == []
+        assert [e.message for e in strict] == [plain[0].message]
+        assert not strict[0].is_warning
 
     def test_knob_disables_exactly_this_rule(self, make_project):
         # No destination anywhere in config: the rule errors when enabled.
@@ -1855,8 +1898,8 @@ class TestIncrementalCursorRequiredValidator:
         assert "re-extracts it in full" in errors[0].message
 
     def test_it_is_an_error_not_a_warning(self, tmp_path):
-        """validate_sources drops warnings outside --strict, so a warning here
-        would be invisible in the run that matters."""
+        """A warning never fails a run outside --strict, so a project that
+        switched this opt-in rule on would get no gate."""
         assert all(not e.is_warning for e in self._validate(self._ctx(tmp_path, cursor=False)))
 
     def test_declared_cursor_passes(self, tmp_path):

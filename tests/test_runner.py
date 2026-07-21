@@ -19,6 +19,9 @@ from typing import Any
 import dlt
 import pydantic
 import pytest
+from dlt.common.configuration.container import Container
+from dlt.common.configuration.specs import PluggableRunContext
+from dlt.common.runtime.run_context import switch_context
 
 import dlt_ops.discovery.runner as runner_mod
 from dlt_ops.config import UnresolvedDatasetError, UnresolvedDestinationError
@@ -54,6 +57,22 @@ def _isolate_run_env(tmp_path, monkeypatch):
             os.environ.pop(var, None)
         else:
             os.environ[var] = value
+
+
+@pytest.fixture
+def dlt_run_context():
+    """Point dlt's own provider chain at a project root, restoring it afterwards.
+
+    dlt reads ``.dlt/config.toml`` relative to its run context, which is fixed
+    at whatever directory the process first resolved config in. Tests that
+    assert on the config chain have to move it to the tmp project explicitly.
+    """
+    pluggable = Container()[PluggableRunContext]
+    cookie = pluggable.push_context()
+    try:
+        yield lambda root: switch_context(str(root))
+    finally:
+        pluggable.pop_context(cookie)
 
 
 def make_source_info(
@@ -526,6 +545,19 @@ class TestEndToEnd:
         assert _query(pipeline, "SELECT COUNT(*) FROM analytics.page_views")[0][0] == 2
 
 
+TUNED_PROJECT_CONFIG = """\
+    [dlt_ops]
+    default_destination = "duckdb"
+    default_dataset = "analytics"
+
+    [normalize]
+    workers = 9
+
+    [load]
+    workers = 7
+"""
+
+
 class TestLocalWorkerDefaults:
     def test_duckdb_run_applies_local_defaults_even_with_explicit_dataset(self, make_project):
         """The old `is_local = dataset_name is None` conflation is gone: local
@@ -535,6 +567,70 @@ class TestLocalWorkerDefaults:
         run_pipeline(info, project_root=root, dataset_name="explicit_ds")
         assert os.environ.get("NORMALIZE__WORKERS") == "4"
         assert os.environ.get("LOAD__WORKERS") == "3"
+
+    def test_configured_workers_survive_a_local_run(self, make_project, dlt_run_context):
+        """Environment variables outrank every other dlt provider, so the
+        dev-loop default is applied only where the project configured nothing.
+        Writing it unconditionally would silently demote [normalize] workers."""
+        root = make_project(config=TUNED_PROJECT_CONFIG)
+        dlt_run_context(root)
+        assert dlt.config.get("normalize.workers", int) == 9, "config.toml must be visible before the run"
+
+        info = make_source_info("tuning_rows", simple_rows_source)
+        run_pipeline(info, project_root=root)
+
+        assert os.environ.get("NORMALIZE__WORKERS") is None
+        assert os.environ.get("LOAD__WORKERS") is None
+        assert dlt.config.get("normalize.workers", int) == 9
+        assert dlt.config.get("load.workers", int) == 7
+
+    def test_local_defaults_apply_when_nothing_is_configured(self, make_project, dlt_run_context):
+        """The dev-loop convenience is intact: a project that says nothing about
+        workers still gets the local numbers on a DuckDB run."""
+        root = make_project(config=PROJECT_CONFIG)
+        dlt_run_context(root)
+        assert dlt.config.get("normalize.workers", int) is None
+
+        info = make_source_info("tuning_rows", simple_rows_source)
+        run_pipeline(info, project_root=root)
+
+        assert dlt.config.get("normalize.workers", int) == 4
+        assert dlt.config.get("load.workers", int) == 3
+        # No local default is declared for file size — it stays dlt's business.
+        assert os.environ.get("NORMALIZE__DATA_WRITER__FILE_MAX_ITEMS") is None
+
+    def test_explicit_flag_outranks_a_configured_value(self, make_project, dlt_run_context):
+        """`-n` is an override, not a default: it wins over config.toml too."""
+        root = make_project(config=TUNED_PROJECT_CONFIG)
+        dlt_run_context(root)
+        info = make_source_info("tuning_rows", simple_rows_source)
+        run_pipeline(info, project_root=root, normalize_workers=2, file_max_items=500)
+
+        assert os.environ.get("NORMALIZE__WORKERS") == "2"
+        assert os.environ.get("NORMALIZE__DATA_WRITER__FILE_MAX_ITEMS") == "500"
+        assert dlt.config.get("normalize.workers", int) == 2
+        assert dlt.config.get("load.workers", int) == 7
+
+    def test_exported_env_var_outranks_the_local_default(self, make_project, dlt_run_context, monkeypatch):
+        """A value the operator or orchestrator exported is a deliberate choice."""
+        root = make_project(config=PROJECT_CONFIG)
+        dlt_run_context(root)
+        monkeypatch.setenv("LOAD__WORKERS", "6")
+        info = make_source_info("tuning_rows", simple_rows_source)
+        run_pipeline(info, project_root=root)
+
+        assert os.environ.get("LOAD__WORKERS") == "6"
+        assert os.environ.get("NORMALIZE__WORKERS") == "4"
+
+    def test_local_default_keys_map_to_the_documented_env_vars(self):
+        """The defaults are keyed by dlt config key; the env-var spelling comes
+        from dlt's own EnvironProvider. Lock the pair the docs promise."""
+        assert runner_mod._env_var_name("normalize.workers") == "NORMALIZE__WORKERS"
+        assert runner_mod._env_var_name("load.workers") == "LOAD__WORKERS"
+        assert (
+            runner_mod._env_var_name("normalize.data_writer.file_max_items") == "NORMALIZE__DATA_WRITER__FILE_MAX_ITEMS"
+        )
+        assert set(runner_mod._LOCAL_DEFAULTS) == {"normalize.workers", "load.workers"}
 
 
 class TestNoShellOut:

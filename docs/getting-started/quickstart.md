@@ -94,7 +94,7 @@ Concretely, `validate`:
 - checks the naming chain above, the `[sources.<X>]` section, and the required `schedule`;
 - checks every `@dlt.resource` declares a Pydantic `columns=` model, and that any declared `schema_contract` is the canonical freeze contract (or a justified evolve opt-in);
 - checks every plugin referenced from config (destinations, secret backends, alert sinks) is actually registered and loadable;
-- flags resource-name overlaps as errors, and — under `--strict` — orphan config sections and stale sources (had run history, then stopped). Those last two are warnings, and a plain `validate` filters warnings out before printing, so the run above reports success without mentioning them. Reach for `validate --strict` when you want the operational picture rather than the pass/fail gate.
+- flags resource-name overlaps as errors, and orphan config sections and stale sources (had run history, then stopped) as warnings. Warnings print in every run — the project above simply has none — but only errors fail the command. Reach for `validate --strict` when you want warnings to fail it too.
 
 See exactly which rules resolved and their on/off state:
 

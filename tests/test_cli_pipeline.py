@@ -11,6 +11,8 @@ stubs only need to exist at call time.
 
 from __future__ import annotations
 
+import itertools
+import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -166,6 +168,15 @@ def _iter_command_paths(cmd: click.Command, path: tuple[str, ...] = ()):
             yield from _iter_command_paths(sub, (*path, name))
 
 
+def _iter_json_command_paths(cmd: click.Command, path: tuple[str, ...] = ()):
+    """Yield the invocation path of every command exposing a ``--json`` flag."""
+    if isinstance(cmd, click.Group):
+        for name, sub in cmd.commands.items():
+            yield from _iter_json_command_paths(sub, (*path, name))
+    elif any("--json" in param.opts for param in cmd.params):
+        yield path
+
+
 class TestHelpSurface:
     def test_every_verb_renders_help(self, runner):
         """--help resolves for every command in the tree, groups included."""
@@ -191,6 +202,35 @@ class TestHelpSurface:
         result = runner.invoke(cli, ["pipeline", "--help"])
         assert result.exit_code == 0, result.output
         assert "ingestion" not in result.output
+
+
+class TestJsonOutputIsMachineParseable:
+    """``--json`` puts a document on stdout and nothing else.
+
+    The progress indicator writes its label to stdout, so a verb that still
+    renders it under ``--json`` emits a line ahead of the document and no
+    consumer can parse the result.
+    """
+
+    JSON_INVOCATIONS = [
+        ("pipeline", "list"),
+        ("pipeline", "resources", "-s", "github_events"),
+        ("pipeline", "validate"),
+        ("pipeline", "validate", "--strict"),
+        ("pipeline", "status"),
+    ]
+
+    @pytest.mark.parametrize("argv", JSON_INVOCATIONS, ids=" ".join)
+    def test_stdout_is_a_json_document(self, runner, project, argv):
+        result = runner.invoke(cli, ["--root", str(project), *argv, "--json"])
+        json.loads(result.output)  # raises if anything precedes or follows the document
+
+    def test_every_json_verb_is_covered(self):
+        """A verb that gains ``--json`` joins JSON_INVOCATIONS or this fails."""
+        covered = {
+            tuple(itertools.takewhile(lambda token: not token.startswith("-"), argv)) for argv in self.JSON_INVOCATIONS
+        }
+        assert covered == set(_iter_json_command_paths(cli))
 
 
 class TestRootResolution:

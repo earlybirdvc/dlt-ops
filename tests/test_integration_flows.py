@@ -373,9 +373,11 @@ class TestDuckDBToFilesystem:
     """Core tier: .duckdb file -> plain duckdb connection -> local file:// bucket, no adapter."""
 
     def test_validate_exits_zero_on_the_core_tier(self, duck_fs_lane):
+        """Core mode is reported, not blocked: the warning renders and the gate stays open."""
         proc = _run_cli(duck_fs_lane.root, "pipeline", "validate", env=duck_fs_lane.env)
         assert proc.returncode == 0, _out(proc)
-        assert "validated successfully" in proc.stdout
+        assert "core mode" in proc.stdout
+        assert "1 warning(s)" in proc.stdout
 
     def test_run_lands_seeded_rows_as_bucket_files(self, duck_fs_lane):
         proc = _run_cli(duck_fs_lane.root, "pipeline", "run", "-s", DUCK_FS_SOURCE, "-y", env=duck_fs_lane.env)

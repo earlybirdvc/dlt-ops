@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import logging
 import sys
 from pathlib import Path
@@ -7,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import click
 
-from dlt_ops.cli._common import _discover_with_progress, resolve_cli_project_root
+from dlt_ops.cli._common import _discover_with_progress, _with_progress, resolve_cli_project_root
 from dlt_ops.cli.backfill import backfill
 from dlt_ops.cli.status import status
 from dlt_ops.config import (
@@ -55,7 +56,7 @@ def list_sources(ctx: click.Context, filter_schedule: str | None, output_json: b
         dlt-ops pipeline list --json
     """
     project_root = resolve_cli_project_root(ctx)
-    sources = _discover_with_progress(project_root, discover)
+    sources = discover(project_root) if output_json else _discover_with_progress(project_root, discover)
 
     if not sources:
         click.echo(click.style("No sources found", fg="yellow"))
@@ -140,7 +141,7 @@ def resources(ctx: click.Context, source_name: str | None, output_json: bool) ->
         dlt-ops pipeline resources  # interactive selection
     """
     project_root = resolve_cli_project_root(ctx)
-    sources = _discover_with_progress(project_root, discover)
+    sources = discover(project_root) if output_json else _discover_with_progress(project_root, discover)
 
     # Interactive source selection if not provided
     if not source_name:
@@ -202,9 +203,9 @@ def resources(ctx: click.Context, source_name: str | None, output_json: bool) ->
 @click.option("--resource", "-r", "resource_names", multiple=True, help="Resource(s) to run. Omit for all.")
 @click.option("--dataset", "-d", "dataset_name", help="Dataset override. Default: resolved from .dlt/config.toml")
 @click.option(
-    "--normalize-workers", "-n", type=int, help="Parallel normalize workers. Unset: 4 on DuckDB, else config.toml"
+    "--normalize-workers", "-n", type=int, help="Parallel normalize workers. Unset: config.toml, else 4 on DuckDB"
 )
-@click.option("--load-workers", "-l", type=int, help="Parallel load workers. Unset: 3 on DuckDB, else config.toml")
+@click.option("--load-workers", "-l", type=int, help="Parallel load workers. Unset: config.toml, else 3 on DuckDB")
 @click.option("--file-max-items", "-f", type=int, help="Max rows per normalized file")
 @click.option("--interactive", "-I", is_flag=True, help="Interactive resource selection")
 @click.option("--yes", "-y", is_flag=True, help="Non-interactive mode, skip confirmations")
@@ -425,8 +426,9 @@ def validate(ctx: click.Context, strict: bool, output_json: bool, show_resolved_
     Source modules import inside the Phase-2 sandbox first: modules that fail
     to import and modules that violate Rule 15 (network I/O or disk writes at
     import time; opt out via [dlt_ops.rules] import_safety = false) are
-    reported as errors. Findings are errors or warnings; warnings only fail
-    the run with --strict.
+    reported as errors. Findings are errors or warnings; both always render,
+    and warnings fail the run only under --strict, which promotes them to
+    errors.
 
     Examples:
         dlt-ops pipeline validate
@@ -440,16 +442,9 @@ def validate(ctx: click.Context, strict: bool, output_json: bool, show_resolved_
         _show_resolved_rules(project_root)
         return
 
-    with click.progressbar(
-        length=1,
-        label=click.style("Validating sources", fg="cyan"),
-        show_eta=False,
-        show_percent=False,
-        fill_char=click.style("█", fg="cyan"),
-        empty_char="░",
-    ) as bar:
-        errors = validate_sources(project_root, strict=strict)
-        bar.update(1)
+    # --json keeps stdout machine-parseable: no progress indicator.
+    run_validation = functools.partial(validate_sources, project_root, strict=strict)
+    errors = run_validation() if output_json else _with_progress("Validating sources", run_validation)
 
     if output_json:
         import json
@@ -464,7 +459,7 @@ def validate(ctx: click.Context, strict: bool, output_json: bool, show_resolved_
             for e in errors
         ]
         click.echo(json.dumps(data, indent=2))
-        if any(not e.is_warning for e in errors) or (strict and errors):
+        if any(not e.is_warning for e in errors):
             sys.exit(1)
         return
 
@@ -474,7 +469,8 @@ def validate(ctx: click.Context, strict: bool, output_json: bool, show_resolved_
         click.echo()
         return
 
-    # Separate errors and warnings
+    # Severity is already resolved for this run: --strict promoted its warnings
+    # to errors upstream, so nothing here re-reads the flag to decide the exit.
     real_errors = [e for e in errors if not e.is_warning]
     warnings = [e for e in errors if e.is_warning]
 
@@ -493,10 +489,8 @@ def validate(ctx: click.Context, strict: bool, output_json: bool, show_resolved_
         click.echo()
         sys.exit(1)
 
-    if strict and warnings:
-        click.echo(click.style("✗ --strict: warnings treated as errors", fg="red", bold=True))
-        click.echo()
-        sys.exit(1)
+    click.echo(click.style(f"✓ No errors ({len(warnings)} warning(s))", fg="green", bold=True))
+    click.echo()
 
 
 def _remote_clean_refusal(destination: str | None) -> click.ClickException:

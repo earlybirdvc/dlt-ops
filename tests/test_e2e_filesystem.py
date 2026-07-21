@@ -159,21 +159,25 @@ class TestCoreTierFilesystemEndToEnd:
     """The offline filesystem lane: the core tier's executable definition of done."""
 
     def test_1_validate_surfaces_the_core_mode_warning(self, tmp_path, monkeypatch):
-        """The destination_capability finding is a warning: default validate does
-        not block a core-mode project (degrade-by-default), and --strict surfaces
-        it naming the destination and every dark feature."""
+        """The destination_capability finding is a warning: both runs name the
+        destination and every dark feature, and only --strict blocks on it —
+        default validate reports core mode without gating (degrade-by-default)."""
         root, _bucket = _scaffold_fs_project(tmp_path, monkeypatch)
 
         default = _invoke(root, "pipeline", "validate")
         assert default.exit_code == 0, default.output
+        assert "warning(s)" in default.output
 
         strict = _invoke(root, "pipeline", "validate", "--strict")
         assert strict.exit_code == 1, strict.output
-        assert SOURCE in strict.output
-        assert f"'{DESTINATION}'" in strict.output
-        assert "core mode" in strict.output
-        for feature in ADAPTER_GATED_FEATURES:
-            assert feature in strict.output
+        assert "error(s)" in strict.output
+
+        for output in (default.output, strict.output):
+            assert SOURCE in output
+            assert f"'{DESTINATION}'" in output
+            assert "core mode" in output
+            for feature in ADAPTER_GATED_FEATURES:
+                assert feature in output
 
     def test_2_run_lands_files_warns_once_and_skips_ledger(self, tmp_path, monkeypatch, caplog):
         """The core loop completes: rows and the trace land as files, exactly one

@@ -429,10 +429,10 @@ class TestReducedCoverageIsLoud:
         assert "reduced rule coverage" in coverage[0].message
 
     def test_it_is_an_error_not_a_warning(self, errors):
-        """A warning is filtered out of every non-strict run — which is exactly
-        the run that must not imply it checked more than it did. `errors` comes
-        from a non-strict validate_sources, so the finding being present here is
-        itself half the assertion."""
+        """A warning renders without failing the run — and this is exactly the
+        run that must not exit 0 implying it checked more than it did. `errors`
+        comes from a non-strict validate_sources, so the finding being present
+        here is itself half the assertion."""
         coverage = [e for e in errors if e.field == COVERAGE_FIELD]
         assert coverage and all(not e.is_warning for e in coverage)
 

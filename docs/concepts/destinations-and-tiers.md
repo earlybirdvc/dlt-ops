@@ -97,14 +97,16 @@ A registered adapter that fails to load, or is missing part of the `DestinationA
 
 **Core tier splits along the same asymmetry as the rest of the [failure-semantics contract](failure-semantics.md): observability goes quiet, gates refuse.**
 
-**Observability goes quiet.** The runs ledger has nowhere to live on a core-tier destination, so both ledger writes skip with one INFO line each (shown above) — not an error, because nothing is broken. `status` reports the source as `ledger unsupported`, a state kept distinct from an outage. The `destination_capability` rule reports core mode as a `validate` warning, and `--strict` is what surfaces it: a plain `validate` filters warnings out before printing, so it reports `✓ All sources validated successfully` and exits 0. Add `--strict` to see the notice and to fail on it —
+**Observability goes quiet.** The runs ledger has nowhere to live on a core-tier destination, so both ledger writes skip with one INFO line each (shown above) — not an error, because nothing is broken. `status` reports the source as `ledger unsupported`, a state kept distinct from an outage. The `destination_capability` rule reports core mode as a `validate` warning: a plain `validate` prints the notice and still exits 0, because core mode is a fact about the destination rather than a defect in the project —
 
 ```text
 ⚠ 1 warning(s):
   [demo_events] destination: destination 'filesystem' has no registered DestinationAdapter — running in core mode; adapter-gated features unavailable: runs ledger and status, checkpoints, backfill, clean (remote), reconcile, assertion quarantine
 
-✗ --strict: warnings treated as errors
+✓ No errors (1 warning(s))
 ```
+
+Add `--strict` to make it a gate: the same notice renders under `✗ 1 error(s):` and the command exits 1.
 
 **Gates refuse before any work.** A feature your config explicitly demands cannot silently downgrade: a run that engages `@with_checkpoints`, assertion `quarantine`, or backfill's chunk state on a core-tier destination is refused at Tier-2 preflight with a `DestinationCapabilityError` naming the engaged feature, and `reconcile` and remote `clean` refuse with a capability-specific message (`clean --local-only`, which never resolves the destination, keeps working). Teams that operate on the adapter-backed surfaces can make absence itself fatal:
 

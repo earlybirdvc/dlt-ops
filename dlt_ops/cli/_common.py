@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 import click
 
@@ -15,6 +15,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from dlt_ops.discovery import SourceInfo
+
+T = TypeVar("T")
 
 
 def resolve_cli_project_root(ctx: click.Context) -> Path:
@@ -31,6 +33,26 @@ def resolve_cli_project_root(ctx: click.Context) -> Path:
         sys.exit(1)
 
 
+def _with_progress(label: str, work: Callable[[], T]) -> T:
+    """Run ``work`` behind the CLI's progress indicator.
+
+    The indicator writes to stdout, so a verb with a ``--json`` mode must call
+    ``work`` directly in that mode — the label would otherwise precede the
+    document and stop it parsing.
+    """
+    with click.progressbar(
+        length=1,
+        label=click.style(label, fg="cyan"),
+        show_eta=False,
+        show_percent=False,
+        fill_char=click.style("█", fg="cyan"),
+        empty_char="░",
+    ) as bar:
+        result = work()
+        bar.update(1)
+    return result
+
+
 def _discover_with_progress(
     project_root: Path,
     discover_fn: Callable[[Path], dict[str, SourceInfo]] = discover_sources,
@@ -41,14 +63,4 @@ def _discover_with_progress(
     never imports source code. Execution verbs (run/clean) keep the default
     composite ``discover_sources``, which attaches imported callables.
     """
-    with click.progressbar(
-        length=1,
-        label=click.style("Discovering sources", fg="cyan"),
-        show_eta=False,
-        show_percent=False,
-        fill_char=click.style("█", fg="cyan"),
-        empty_char="░",
-    ) as bar:
-        sources = discover_fn(project_root)
-        bar.update(1)
-    return sources
+    return _with_progress("Discovering sources", lambda: discover_fn(project_root))

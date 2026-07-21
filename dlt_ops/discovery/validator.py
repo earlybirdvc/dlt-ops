@@ -94,9 +94,9 @@ def rule_provider_errors(assembly: RuleAssembly) -> list[ValidationError]:
 
     A provider that raised contributes zero rules, so ``validate`` would
     otherwise check less than it claims and still report success. These are
-    errors rather than warnings for two reasons: a warning is filtered out of
-    every non-``--strict`` run, which is precisely the run that must not
-    claim success; and the Tier-2 runtime preflight already hard-fails on a
+    errors rather than warnings for two reasons: a warning renders without
+    failing the run outside ``--strict``, and this is precisely the run that
+    must not exit 0; and the Tier-2 runtime preflight already hard-fails on a
     plugin that soft-failed at load, so a passing Tier 1 followed by a
     refused ``run`` would be the worse contradiction.
 
@@ -239,6 +239,19 @@ def _load_project_config(project_root: Path) -> ProjectConfig:
         return ProjectConfig()
 
 
+def _apply_strict(findings: list[ValidationError], strict: bool) -> list[ValidationError]:
+    """Re-tag every warning as an error under ``strict``; pass through otherwise.
+
+    The single site of the strict policy, so ``is_warning`` alone answers "does
+    this finding fail the run?" for every caller in both modes and no caller has
+    to re-implement the promotion. Findings are never dropped: a warning is
+    rendered by an ordinary run, it just does not fail it.
+    """
+    if not strict:
+        return findings
+    return [attrs.evolve(finding, is_warning=False) if finding.is_warning else finding for finding in findings]
+
+
 def validate_sources(
     project_root: Path,
     *,
@@ -265,15 +278,22 @@ def validate_sources(
     to parse, raises, or is withheld for violating Rule 15) is
     infrastructure, not a rule: always on, no knob.
 
+    Every finding is returned in both modes — warnings included, so callers
+    can render them — and ``is_warning`` carries the finding's severity *for
+    this run*: ``strict`` promotes warnings to errors before returning, so a
+    caller decides pass/fail with one question in either mode, "is any finding
+    not a warning?".
+
     Args:
         project_root: Path to the project root
         validators: Escape hatch — run exactly these callables instead of the
             resolved rule set. Rule knobs and exemptions key on rule IDs and
             therefore do not apply to a custom list.
-        strict: If True, treat warnings as errors
+        strict: If True, promote warnings to errors (``is_warning=False``) so
+            they fail the run.
 
     Returns:
-        List of ValidationError objects
+        Every finding, errors and warnings alike.
     """
     introspected = introspect(project_root, discover(project_root, include_unloadable=True))
     sources = {name: info for name, info in introspected.items() if info.is_introspected}
@@ -286,8 +306,7 @@ def validate_sources(
             project_root=project_root,
             introspected=introspected,
         )
-        errors = [error for validator in validators for error in validator(ctx)]
-        return errors if strict else [e for e in errors if not e.is_warning]
+        return _apply_strict([error for validator in validators for error in validator(ctx)], strict)
 
     assembly = load_rule_specs()
     project_config = _load_project_config(project_root)
@@ -314,7 +333,4 @@ def validate_sources(
             finding for finding in spec.validator(ctx) if not ctx.is_exempt(finding.source_name, spec.rule_id)
         )
 
-    if not strict:
-        errors = [e for e in errors if not e.is_warning]
-
-    return errors
+    return _apply_strict(errors, strict)

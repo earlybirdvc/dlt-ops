@@ -117,7 +117,7 @@ dlt-ops pipeline status --limit 1 --json
 ]
 ```
 
-`status` runs Phase-1 discovery only (it never imports your source code) and is strictly read-only against the destination. The ledger also feeds one Tier-1 rule: `stale_sources` warns about sources that have run history and then stopped — and stays quiet when the ledger is unreachable, because `validate` never requires destination credentials. Its findings are warnings, which `validate` renders only under `--strict`, so schedule that form if you want staleness surfaced.
+`status` runs Phase-1 discovery only (it never imports your source code) and is strictly read-only against the destination. The ledger also feeds one Tier-1 rule: `stale_sources` warns about sources that have run history and then stopped — and stays quiet when the ledger is unreachable, because `validate` never requires destination credentials. Its findings are warnings: every `validate` run prints them, and `--strict` is what makes them fail the command.
 
 ## Three absence states
 
