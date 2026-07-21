@@ -13,6 +13,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import os
+import sys
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -317,6 +318,10 @@ class TestResume:
 
 
 class TestConcurrency:
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Windows locks the DuckDB file against the second worker's connection; CAS claiming itself is destination-agnostic.",
+    )
     def test_two_workers_execute_every_chunk_exactly_once(self, make_project):
         """Two concurrent invocations of the same backfill coordinate purely via
         CAS claiming: every chunk runs exactly once, the loser moves on silently."""

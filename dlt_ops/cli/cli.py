@@ -1,5 +1,6 @@
 """CLI for dlt_ops utilities."""
 
+import sys
 from pathlib import Path
 
 import click
@@ -7,6 +8,21 @@ from dlt_ops.checkpoints import DEFAULT_CHECKPOINT_TABLE, cleanup_checkpoints, l
 from dlt_ops.cli.init import init
 from dlt_ops.cli.pipeline import pipeline
 from dlt_ops.cli.plugins import plugins
+
+
+def _force_utf8_output() -> None:
+    """Status glyphs (✓ ✗ ⚠ █) are outside cp1252, which Python picks for a
+    non-tty stdout on Windows — encoding them raises and takes the command down
+    after its work already succeeded. Only safe because this is the entry point.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
 
 
 @click.group()
@@ -21,6 +37,7 @@ from dlt_ops.cli.plugins import plugins
 @click.pass_context
 def cli(ctx: click.Context, project_root: Path | None):
     """dlt-ops — opinionated project layout and toolchain for dlt pipelines."""
+    _force_utf8_output()
     ctx.ensure_object(dict)
     if project_root:
         ctx.obj["project_root"] = project_root
