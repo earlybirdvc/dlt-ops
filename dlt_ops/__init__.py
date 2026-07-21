@@ -40,7 +40,7 @@ from dlt_ops.secrets import SecretBackend
 # via hatchling's [tool.hatch.version], and python-semantic-release stamps
 # it at release time (0.0.0 = no release cut yet; must stay plain semver —
 # a PEP440 suffix like .dev0 would survive the stamp regex).
-__version__ = "0.0.0"
+__version__ = "0.1.0"
 
 _LAZY_RECONCILER_EXPORTS = frozenset(
     {"AlertSink", "DriftFinding", "ReconcileResult", "detect_removal", "reconcile_all", "reconcile_source"}
