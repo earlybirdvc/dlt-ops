@@ -145,7 +145,7 @@ def local_pipeline_dir(dlt_home):
         },
         "_local": {"first_run": False},
     }
-    (pipeline_dir / "state.json").write_text(json.dumps(state))
+    (pipeline_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
 
     schemas_dir = pipeline_dir / "schemas"
     schemas_dir.mkdir()
@@ -158,7 +158,7 @@ def local_pipeline_dir(dlt_home):
             "test_lists": {"resource": "lists"},
         }
     }
-    (schemas_dir / "test_source.schema.json").write_text(json.dumps(schema))
+    (schemas_dir / "test_source.schema.json").write_text(json.dumps(schema), encoding="utf-8")
 
     return pipeline_dir
 
@@ -392,7 +392,7 @@ class TestRemoteDropDelegation:
             destination="fake",
         )
 
-        state = json.loads((local_pipeline_dir / "state.json").read_text())
+        state = json.loads((local_pipeline_dir / "state.json").read_text(encoding="utf-8"))
         assert sorted(state["sources"]["test_source"]["resources"]) == ["lists", "organizations"]
         assert (local_pipeline_dir / "schemas" / "test_source.schema.json").exists()
 
@@ -404,7 +404,7 @@ class TestLocalStateModification:
     def test_selective_state_removal(self, local_pipeline_dir):
         cleaned = _clean_local_state_selective(local_pipeline_dir, "test_source", ["organizations"])
 
-        state = json.loads((local_pipeline_dir / "state.json").read_text())
+        state = json.loads((local_pipeline_dir / "state.json").read_text(encoding="utf-8"))
         assert "organizations" not in state["sources"]["test_source"]["resources"]
         assert "lists" in state["sources"]["test_source"]["resources"]
         assert state["_state_version"] == 6  # bumped from 5
@@ -416,7 +416,7 @@ class TestLocalStateModification:
     def test_selective_removes_only_target(self, local_pipeline_dir):
         _clean_local_state_selective(local_pipeline_dir, "test_source", ["lists"])
 
-        state = json.loads((local_pipeline_dir / "state.json").read_text())
+        state = json.loads((local_pipeline_dir / "state.json").read_text(encoding="utf-8"))
         assert "organizations" in state["sources"]["test_source"]["resources"]
         assert "lists" not in state["sources"]["test_source"]["resources"]
 
@@ -432,15 +432,15 @@ class TestLocalStateModification:
         refusal is loud and names the way out.
         """
         state_path = local_pipeline_dir / "state.json"
-        state = json.loads(state_path.read_text())
+        state = json.loads(state_path.read_text(encoding="utf-8"))
         state["_state_engine_version"] = 99
-        state_path.write_text(json.dumps(state))
+        state_path.write_text(json.dumps(state), encoding="utf-8")
 
         with pytest.raises(RuntimeError, match="state engine version"):
             _clean_local_state_selective(local_pipeline_dir, "test_source", ["organizations"])
 
         # Nothing was half-done: the resource is still there and so is the schema.
-        after = json.loads(state_path.read_text())
+        after = json.loads(state_path.read_text(encoding="utf-8"))
         assert "organizations" in after["sources"]["test_source"]["resources"]
         assert (local_pipeline_dir / "schemas" / "test_source.schema.json").exists()
 
@@ -454,7 +454,7 @@ class TestLocalStateModification:
         )
         pipeline.run([{"id": 1}], table_name="rows")
 
-        state = json.loads((tmp_path / "home" / "engine_probe_pipeline" / "state.json").read_text())
+        state = json.loads((tmp_path / "home" / "engine_probe_pipeline" / "state.json").read_text(encoding="utf-8"))
         assert state["_state_engine_version"] == cleanup_module._STATE_ENGINE_VERSION
 
 
@@ -640,7 +640,7 @@ class TestSelectiveCleanup:
 
         assert local_pipeline_dir.exists()
         assert len(result["local"]) > 0
-        state = json.loads((local_pipeline_dir / "state.json").read_text())
+        state = json.loads((local_pipeline_dir / "state.json").read_text(encoding="utf-8"))
         assert "organizations" not in state["sources"]["test_source"]["resources"]
         assert "lists" in state["sources"]["test_source"]["resources"]
 
@@ -690,9 +690,9 @@ class TestValidation:
     ):
         """A refusal that fired after the drop would leave a half-cleaned pipeline."""
         state_path = local_pipeline_dir / "state.json"
-        state = json.loads(state_path.read_text())
+        state = json.loads(state_path.read_text(encoding="utf-8"))
         state["_state_engine_version"] = 99
-        state_path.write_text(json.dumps(state))
+        state_path.write_text(json.dumps(state), encoding="utf-8")
 
         with pytest.raises(RuntimeError, match="state engine version"):
             clean_pipeline(
@@ -711,9 +711,9 @@ class TestValidation:
     def test_full_clean_ignores_the_state_engine_version(self, fake_boundary, dlt_drop, local_pipeline_dir):
         """A full clean deletes the working dir outright, so it never reads the layout."""
         state_path = local_pipeline_dir / "state.json"
-        state = json.loads(state_path.read_text())
+        state = json.loads(state_path.read_text(encoding="utf-8"))
         state["_state_engine_version"] = 99
-        state_path.write_text(json.dumps(state))
+        state_path.write_text(json.dumps(state), encoding="utf-8")
 
         result = clean_pipeline(
             source=make_source(),
@@ -1126,7 +1126,7 @@ class TestCleanupEndToEnd:
 
         # Local surgery: state entry removed, schema file deleted, dir kept
         assert e2e["working_dir"].exists()
-        local_state = json.loads((e2e["working_dir"] / "state.json").read_text())
+        local_state = json.loads((e2e["working_dir"] / "state.json").read_text(encoding="utf-8"))
         assert "orgs" not in local_state["sources"]["cats"]["resources"]
         assert "depts" in local_state["sources"]["cats"]["resources"]
         assert not (e2e["working_dir"] / "schemas" / "cats.schema.json").exists()
@@ -1158,7 +1158,7 @@ class TestCleanupEndToEnd:
 
     def test_remote_only_leaves_local_state_untouched(self, e2e):
         """dlt's drop is a pipeline run; it must not run through the user's working dir."""
-        before = json.loads((e2e["working_dir"] / "state.json").read_text())
+        before = json.loads((e2e["working_dir"] / "state.json").read_text(encoding="utf-8"))
 
         clean_pipeline(
             source=e2e["info"],
@@ -1170,7 +1170,7 @@ class TestCleanupEndToEnd:
         )
 
         assert self._count(e2e, "orgs_tbl") is None  # remote really was dropped
-        after = json.loads((e2e["working_dir"] / "state.json").read_text())
+        after = json.loads((e2e["working_dir"] / "state.json").read_text(encoding="utf-8"))
         assert sorted(after["sources"]["cats"]["resources"]) == sorted(before["sources"]["cats"]["resources"])
         assert (e2e["working_dir"] / "schemas" / "cats.schema.json").exists()
 

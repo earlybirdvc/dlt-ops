@@ -974,7 +974,7 @@ class TestDestinationCapabilityValidator:
     ) -> ValidationContext:
         """ctx whose project_root carries a real marker — the rule loads ProjectConfig from disk."""
         (tmp_path / ".dlt").mkdir(parents=True, exist_ok=True)
-        (tmp_path / ".dlt" / "config.toml").write_text(dedent(config_toml))
+        (tmp_path / ".dlt" / "config.toml").write_text(dedent(config_toml), encoding="utf-8")
         source = SourceInfo(
             name="events_api",
             pipeline_name="events",
@@ -1322,7 +1322,8 @@ class TestResourceColumnsHintValidator:
             "    id: int\n\n"
             "@dlt.resource(columns=MyModel, write_disposition='replace')\n"
             "def my_resource():\n"
-            "    yield []\n"
+            "    yield []\n",
+            encoding="utf-8",
         )
         assert _has_columns_kwarg(source_file, "my_resource") is True
 
@@ -1331,7 +1332,8 @@ class TestResourceColumnsHintValidator:
 
         source_file = tmp_path / "resource.py"
         source_file.write_text(
-            "import dlt\n\n@dlt.resource(write_disposition='replace')\ndef my_resource():\n    yield []\n"
+            "import dlt\n\n@dlt.resource(write_disposition='replace')\ndef my_resource():\n    yield []\n",
+            encoding="utf-8",
         )
         assert _has_columns_kwarg(source_file, "my_resource") is False
 
@@ -1340,7 +1342,8 @@ class TestResourceColumnsHintValidator:
 
         source_file = tmp_path / "resource.py"
         source_file.write_text(
-            'import dlt\n\n@dlt.resource(columns={"id": {"data_type": "bigint"}})\ndef my_resource():\n    yield []\n'
+            'import dlt\n\n@dlt.resource(columns={"id": {"data_type": "bigint"}})\ndef my_resource():\n    yield []\n',
+            encoding="utf-8",
         )
         assert _has_columns_kwarg(source_file, "my_resource") is True
 
@@ -1349,7 +1352,8 @@ class TestResourceColumnsHintValidator:
 
         source_file = tmp_path / "resource.py"
         source_file.write_text(
-            "def some_decorator(fn):\n    return fn\n\n@some_decorator\ndef my_resource():\n    yield []\n"
+            "def some_decorator(fn):\n    return fn\n\n@some_decorator\ndef my_resource():\n    yield []\n",
+            encoding="utf-8",
         )
         assert _has_columns_kwarg(source_file, "my_resource") is False
 
@@ -1364,7 +1368,8 @@ class TestResourceColumnsHintValidator:
             "    id: int\n\n"
             "@dlt.resource(columns=MyModel)\n"
             "def other_resource():\n"
-            "    yield []\n"
+            "    yield []\n",
+            encoding="utf-8",
         )
         assert _has_columns_kwarg(source_file, "my_resource") is False
 
@@ -1528,7 +1533,7 @@ class TestSchemaContractValidator:
 
     def _write_resource(self, ctx: ValidationContext, body: str) -> None:
         pipeline_dir = next(iter(ctx.sources.values())).path
-        (pipeline_dir / "resource.py").write_text(body)
+        (pipeline_dir / "resource.py").write_text(body, encoding="utf-8")
 
     def test_canonical_contract_passes(self, tmp_path):
         from dlt_ops.discovery.validators.platform_rules import validate_schema_contract
@@ -1583,7 +1588,8 @@ class TestSchemaContractValidator:
         tests_dir = pipeline_dir / "tests"
         tests_dir.mkdir()
         (tests_dir / "test_x.py").write_text(
-            'import dlt\n\n@dlt.resource(schema_contract={"tables": "discard_row"})\ndef fixture_resource():\n    yield []\n'
+            'import dlt\n\n@dlt.resource(schema_contract={"tables": "discard_row"})\ndef fixture_resource():\n    yield []\n',
+            encoding="utf-8",
         )
         assert validate_schema_contract(ctx) == []
 
@@ -1652,10 +1658,12 @@ class TestSchemaContractValidator:
         pipeline_dir.mkdir()
         # Two @dlt.resource calls with distinct name= kwargs, both evolve literal.
         (pipeline_dir / "res_a.py").write_text(
-            f'import dlt\n\n@dlt.resource(name="res_a", {self.EVOLVE_LITERAL})\ndef _res_a():\n    yield []\n'
+            f'import dlt\n\n@dlt.resource(name="res_a", {self.EVOLVE_LITERAL})\ndef _res_a():\n    yield []\n',
+            encoding="utf-8",
         )
         (pipeline_dir / "res_b.py").write_text(
-            f'import dlt\n\n@dlt.resource(name="res_b", {self.EVOLVE_LITERAL})\ndef _res_b():\n    yield []\n'
+            f'import dlt\n\n@dlt.resource(name="res_b", {self.EVOLVE_LITERAL})\ndef _res_b():\n    yield []\n',
+            encoding="utf-8",
         )
         cfg_with_reason = SourceConfig(schedule=Schedule.HOURLY, schema_contract_evolve_reason="justified")
         cfg_without = SourceConfig(schedule=Schedule.HOURLY)
@@ -1694,7 +1702,7 @@ class TestSchemaContractValidator:
         pipeline_dir = tmp_path / "webshop"
         pipeline_dir.mkdir()
         (pipeline_dir / "res_a.py").write_text(
-            f"import dlt\n\n@dlt.resource({self.CANONICAL})\ndef _res_a():\n    yield []\n"
+            f"import dlt\n\n@dlt.resource({self.CANONICAL})\ndef _res_a():\n    yield []\n", encoding="utf-8"
         )
         cfg = SourceConfig(schedule=Schedule.HOURLY)
         source_a = SourceInfo(
@@ -1740,7 +1748,7 @@ class TestSchemaContractValidator:
         """Multi-source dir + a resource whose owner cannot be resolved."""
         pipeline_dir = tmp_path / "multi"
         pipeline_dir.mkdir()
-        (pipeline_dir / "res_x.py").write_text(body)
+        (pipeline_dir / "res_x.py").write_text(body, encoding="utf-8")
         cfg = SourceConfig(schedule=Schedule.HOURLY)
         sources = {
             name: SourceInfo(
@@ -2011,7 +2019,7 @@ class TestCursorNotLoadTimestampValidator:
 
     def _write(self, ctx: ValidationContext, body: str) -> None:
         pipeline_dir = next(iter(ctx.sources.values())).path
-        (pipeline_dir / "resource.py").write_text(body)
+        (pipeline_dir / "resource.py").write_text(body, encoding="utf-8")
 
     def test_business_cursor_passes_when_configured(self, tmp_path):
         from dlt_ops.discovery.validators.platform_rules import validate_cursor_not_load_timestamp

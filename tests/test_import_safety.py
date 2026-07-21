@@ -478,7 +478,7 @@ class TestSandboxContainment:
     @staticmethod
     def _executions(root: Path, name: str) -> list[str]:
         log = root / name / "source" / "executions.log"
-        return log.read_text().splitlines() if log.exists() else []
+        return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
 
     def test_violating_module_executes_only_in_the_sandbox_child(self, make_project):
         name = "contained_probe_api"

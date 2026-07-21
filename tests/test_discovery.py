@@ -859,7 +859,7 @@ class TestModuleScan:
 
     def _scan(self, tmp_path, body: str):
         source_file = tmp_path / "test.py"
-        source_file.write_text(dedent(body))
+        source_file.write_text(dedent(body), encoding="utf-8")
         return _scan_module(source_file)
 
     def test_source_with_explicit_name(self, tmp_path):
@@ -916,7 +916,7 @@ class TestModuleScan:
         """The message is the bare reason — call sites supply the framing
         (`discover` turns it into a SourceInfo.import_error naming the file)."""
         source_file = tmp_path / "invalid.py"
-        source_file.write_text("this is not valid python {{{")
+        source_file.write_text("this is not valid python {{{", encoding="utf-8")
         with pytest.raises(ValueError, match="SyntaxError"):
             _scan_module(source_file)
 

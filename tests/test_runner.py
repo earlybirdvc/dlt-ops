@@ -637,6 +637,6 @@ class TestNoShellOut:
     def test_runner_module_never_shells_out(self):
         """Credentials and destination access resolve in-process — a runner that
         shells out inherits whatever the local workstation happens to have."""
-        source_text = Path(runner_mod.__file__).read_text()
+        source_text = Path(runner_mod.__file__).read_text(encoding="utf-8")
         for token in ("gcloud", "subprocess"):
             assert token not in source_text, f"runner.py must not reference {token!r}"

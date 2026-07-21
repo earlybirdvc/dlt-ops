@@ -92,11 +92,11 @@ def make_project(tmp_path):
     ) -> Path:
         root = tmp_path / name
         (root / ".dlt").mkdir(parents=True)
-        (root / ".dlt" / "config.toml").write_text(dedent(config))
+        (root / ".dlt" / "config.toml").write_text(dedent(config), encoding="utf-8")
         for relpath, body in (files or {}).items():
             path = root / relpath
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(dedent(body))
+            path.write_text(dedent(body), encoding="utf-8")
         return root
 
     return _make

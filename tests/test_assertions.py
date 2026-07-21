@@ -541,7 +541,7 @@ class TestPredicateResolution:
         assert resolve_predicate("tests.test_assertions.no_negative_ids") is no_negative_ids
 
     def test_resolve_project_local_module_via_project_root(self, tmp_path):
-        (tmp_path / "quality_checks_probe_a.py").write_text("def always(row):\n    return True\n")
+        (tmp_path / "quality_checks_probe_a.py").write_text("def always(row):\n    return True\n", encoding="utf-8")
         fn = resolve_predicate("quality_checks_probe_a:always", tmp_path)
         assert fn({"id": 1}) is True
 
@@ -751,14 +751,16 @@ class TestRunnerLifecycle:
     def test_custom_predicate_lifecycle_from_project_root(self, make_project):
         name = "assert_custom_rows"
         root = self._project(make_project, name, "")
-        (root / "quality_checks_probe_b.py").write_text("def no_empty_path(row):\n    return bool(row.get('path'))\n")
+        (root / "quality_checks_probe_b.py").write_text(
+            "def no_empty_path(row):\n    return bool(row.get('path'))\n", encoding="utf-8"
+        )
         config = self.ASSERTED_CONFIG % {"name": name, "assertions": ""} + dedent(
             f"""
             [[sources.{name}.dlt_ops.assertions.events.custom]]
             predicate = "quality_checks_probe_b:no_empty_path"
             """
         )
-        (root / ".dlt" / "config.toml").write_text(dedent(config))
+        (root / ".dlt" / "config.toml").write_text(dedent(config), encoding="utf-8")
         rows = [{"id": 1, "path": "/"}, {"id": 2, "path": ""}]
         info = make_source_info(name, lambda: _events_source(name, rows))
         with pytest.raises(AssertionFailedError, match="predicate quality_checks_probe_b:no_empty_path failed"):
@@ -921,7 +923,7 @@ class TestValidateRules:
         assert declared_columns_for_resource(untyped.resources["events"]) is None
 
     def test_predicate_rule_accepts_resolvable_project_local_predicate(self, tmp_path):
-        (tmp_path / "quality_checks_probe_c.py").write_text("def ok(row):\n    return True\n")
+        (tmp_path / "quality_checks_probe_c.py").write_text("def ok(row):\n    return True\n", encoding="utf-8")
         ctx = _make_validation_ctx(
             tmp_path,
             """
@@ -934,7 +936,7 @@ class TestValidateRules:
     def test_predicate_rule_flags_unimportable_missing_and_noncallable(self, tmp_path):
         """Failure wording comes from the engine's own resolve_predicate — the
         probe fails exactly the way `run` would."""
-        (tmp_path / "quality_checks_probe_d.py").write_text("NOT_CALLABLE = 42\n")
+        (tmp_path / "quality_checks_probe_d.py").write_text("NOT_CALLABLE = 42\n", encoding="utf-8")
         ctx = _make_validation_ctx(
             tmp_path,
             """
@@ -977,7 +979,8 @@ class TestValidateRules:
 
                 def ok(row):
                     return True
-                """)
+                """),
+            encoding="utf-8",
         )
         ctx = _make_validation_ctx(
             tmp_path,
@@ -994,7 +997,7 @@ class TestValidateRules:
         assert "socket.connect" in joined
 
     def test_predicate_rule_probes_each_distinct_predicate_once(self, tmp_path, monkeypatch):
-        (tmp_path / "quality_checks_probe_f.py").write_text("def ok(row):\n    return True\n")
+        (tmp_path / "quality_checks_probe_f.py").write_text("def ok(row):\n    return True\n", encoding="utf-8")
         probed: list[str] = []
 
         def fake_probe(predicate: str, *, project_root: Path):

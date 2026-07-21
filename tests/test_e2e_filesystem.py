@@ -140,11 +140,12 @@ def _scaffold_fs_project(tmp_path, monkeypatch, *, assertions: str = "", strict:
         "\n"
         f"[sources.{SOURCE}.dlt_ops]\n"
         'schedule = "@daily"\n'
-        f"{assertions}"
+        f"{assertions}",
+        encoding="utf-8",
     )
     src_dir = root / SOURCE / "source"
     src_dir.mkdir(parents=True)
-    (src_dir / f"{SOURCE}.py").write_text(FS_SOURCE)
+    (src_dir / f"{SOURCE}.py").write_text(FS_SOURCE, encoding="utf-8")
     return root, bucket
 
 

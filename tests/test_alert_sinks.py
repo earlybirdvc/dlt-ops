@@ -195,7 +195,8 @@ class TestConfigKeys:
                 [dlt_ops.alert_sink.sentry]
                 environment = "prod"
                 """
-            )
+            ),
+            encoding="utf-8",
         )
         config = load_project_config(tmp_path)
         assert config.alert_sinks == ("logging", "sentry")
@@ -204,7 +205,7 @@ class TestConfigKeys:
 
     def test_unset_key_is_none_and_default_is_logging(self, tmp_path):
         (tmp_path / ".dlt").mkdir()
-        (tmp_path / ".dlt" / "config.toml").write_text("[dlt_ops]\n")
+        (tmp_path / ".dlt" / "config.toml").write_text("[dlt_ops]\n", encoding="utf-8")
         config = load_project_config(tmp_path)
         assert config.alert_sinks is None
         assert config.alert_sink_options == {}

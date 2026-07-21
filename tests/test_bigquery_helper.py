@@ -102,7 +102,7 @@ class TestAdapterHelper:
 class TestBigqueryAdapterPartitioningValidator:
     def _write_source(self, ctx: ValidationContext, body: str) -> None:
         pipeline_dir = next(iter(ctx.sources.values())).path
-        (pipeline_dir / "aggregator.py").write_text(body)
+        (pipeline_dir / "aggregator.py").write_text(body, encoding="utf-8")
 
     def test_both_kwargs_pass(self, tmp_path):
         ctx = _make_ctx(tmp_path)

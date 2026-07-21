@@ -252,7 +252,8 @@ class TestSetupSecrets:
             '                    key=ext.get("fixture_var_key", "api_secret_key"),\n'
             "                ),\n"
             "            )\n"
-            "        return ()\n"
+            "        return ()\n",
+            encoding="utf-8",
         )
         monkeypatch.syspath_prepend(str(tmp_path))
         fake_distributions("secret_backend", "fixture_vault", f"{module}:FixtureVault", "acme-secrets")

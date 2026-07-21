@@ -366,7 +366,7 @@ class TestExampleProjectEndToEnd:
         # entry is gone from the resource state.
         state_path = ordered_env.data_dir / "pipelines" / API_PIPELINE / "state.json"
         assert state_path.is_file()
-        state = json.loads(state_path.read_text())
+        state = json.loads(state_path.read_text(encoding="utf-8"))
         assert "events" not in state["sources"][API_SOURCE].get("resources", {})
 
     def test_step8_full_clean_removes_tables_system_rows_and_local_dir(self, ordered_env):

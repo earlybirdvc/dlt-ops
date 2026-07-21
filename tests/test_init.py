@@ -48,13 +48,13 @@ class TestScaffoldLayout:
         _init(runner, root)
 
         marker = root / PROJECT_MARKER
-        data = tomllib.loads(marker.read_text())
+        data = tomllib.loads(marker.read_text(encoding="utf-8"))
         table = data["dlt_ops"]
         # Real (uncommented) duckdb default so the scaffold never fails its
         # own first validate/run; the dataset default stays a commented hint.
         assert table["default_destination"] == "duckdb"
         assert "default_dataset" not in table
-        assert "[sources.my_api]" in marker.read_text()  # commented worked example
+        assert "[sources.my_api]" in marker.read_text(encoding="utf-8")  # commented worked example
 
         assert (root / PROJECT_MARKER.parent / "secrets.toml").is_file()
         assert (root / DEFAULT_PIPELINE_NAME / SOURCE_DIR / ".gitkeep").is_file()
@@ -146,7 +146,7 @@ class TestOverwriteRefusal:
         root = tmp_path / "demo"
         marker = root / PROJECT_MARKER
         marker.parent.mkdir(parents=True)
-        marker.write_text("# hand-written dlt config, not a dlt-ops marker\n")
+        marker.write_text("# hand-written dlt config, not a dlt-ops marker\n", encoding="utf-8")
         before = marker.read_bytes()
 
         result = runner.invoke(cli, ["init", str(root)])
@@ -158,9 +158,9 @@ class TestOverwriteRefusal:
         root = tmp_path / "demo"
         keep = root / DEFAULT_PIPELINE_NAME / SOURCE_DIR / "keep.py"
         keep.parent.mkdir(parents=True)
-        keep.write_text("# user file\n")
+        keep.write_text("# user file\n", encoding="utf-8")
         _init(runner, root)
-        assert keep.read_text() == "# user file\n"
+        assert keep.read_text(encoding="utf-8") == "# user file\n"
         assert (root / PROJECT_MARKER).is_file()
 
 
@@ -190,10 +190,10 @@ class TestExampleSource:
         assert source_file.is_file()
         assert resource_file.is_file()
         # Module stem = config section = explicit decorator name (rules 3-5).
-        assert f'@dlt.source(name="{EXAMPLE_SOURCE_SECTION}")' in source_file.read_text()
-        assert f"def {EXAMPLE_SOURCE_SECTION}_source" in source_file.read_text()
-        assert "columns=Event" in resource_file.read_text()  # rule 14
-        data = tomllib.loads((example_root / PROJECT_MARKER).read_text())
+        assert f'@dlt.source(name="{EXAMPLE_SOURCE_SECTION}")' in source_file.read_text(encoding="utf-8")
+        assert f"def {EXAMPLE_SOURCE_SECTION}_source" in source_file.read_text(encoding="utf-8")
+        assert "columns=Event" in resource_file.read_text(encoding="utf-8")  # rule 14
+        data = tomllib.loads((example_root / PROJECT_MARKER).read_text(encoding="utf-8"))
         assert data["sources"][EXAMPLE_SOURCE_SECTION]["dlt_ops"]["schedule"] == "@daily"  # rules 6-7
 
     def test_pipeline_list_shows_example(self, runner, example_root):

@@ -75,11 +75,12 @@ def _scaffold(root: Path, source: str, destination: str, dataset: str, source_co
             [sources.{source}.dlt_ops]
             schedule = "@daily"
             """
-        )
+        ),
+        encoding="utf-8",
     )
     src_dir = root / source / "source"
     src_dir.mkdir(parents=True)
-    (src_dir / f"{source}.py").write_text(source_code)
+    (src_dir / f"{source}.py").write_text(source_code, encoding="utf-8")
 
 
 def _pg_execute(url: str, *statements: str) -> None:
@@ -236,7 +237,9 @@ def fs_pg_lane(tmp_path_factory, postgres_url):
     base = tmp_path_factory.mktemp("it-fs-pg")
     data_dir = base / "source-data"
     data_dir.mkdir()
-    (data_dir / "events.jsonl").write_text("\n".join(json.dumps(row) for row in FILE_EVENTS_ROWS) + "\n")
+    (data_dir / "events.jsonl").write_text(
+        "\n".join(json.dumps(row) for row in FILE_EVENTS_ROWS) + "\n", encoding="utf-8"
+    )
     root = base / "project"
     _scaffold(root, FS_PG_SOURCE, "postgres", FS_PG_DATASET, FILE_EVENTS_SOURCE)
     # POSTGRES_URL may point at a persistent server: drop the lane's schema so counts are exact.
@@ -385,7 +388,9 @@ class TestDuckDBToFilesystem:
         assert "core (no adapter" in _out(proc)
         data_files = list((duck_fs_lane.bucket / DUCK_FS_DATASET / "metrics").glob("*"))
         assert data_files, "resource rows must land as files under <bucket>/<dataset>/metrics/"
-        landed = [json.loads(line) for f in data_files for line in f.read_text().splitlines() if line.strip()]
+        landed = [
+            json.loads(line) for f in data_files for line in f.read_text(encoding="utf-8").splitlines() if line.strip()
+        ]
         assert len(landed) == len(DUCK_METRICS_ROWS)
         assert {row["name"] for row in landed} == {name for _, name, _ in DUCK_METRICS_ROWS}
 

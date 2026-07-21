@@ -62,7 +62,7 @@ def sentinel_modules(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Two real importable modules; their presence in sys.modules records the import."""
     module_names = ("dltx_lazy_probe_dest", "dltx_lazy_probe_sink")
     for module in module_names:
-        (tmp_path / f"{module}.py").write_text("class Plugin:\n    pass\n")
+        (tmp_path / f"{module}.py").write_text("class Plugin:\n    pass\n", encoding="utf-8")
     monkeypatch.syspath_prepend(str(tmp_path))
     yield module_names
     for module in module_names:

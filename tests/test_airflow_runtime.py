@@ -560,11 +560,11 @@ class TestCleanupTask:
     def test_deletes_old_dlt_entries(self, tmp_path):
         old_dir = tmp_path / "dlt_old"
         old_dir.mkdir()
-        (old_dir / "state.json").write_text("{}")
+        (old_dir / "state.json").write_text("{}", encoding="utf-8")
         fresh_dir = tmp_path / "dlt_fresh"
         fresh_dir.mkdir()
         unrelated = tmp_path / "keep.txt"
-        unrelated.write_text("keep")
+        unrelated.write_text("keep", encoding="utf-8")
         stale = pendulum.now().subtract(days=10).int_timestamp
         os.utime(old_dir, (stale, stale))
 
