@@ -1,0 +1,7 @@
+# Supported dlt minor versions — single source of truth.
+# One minor per line (X.Y); CI installs `dlt~=X.Y.0` per matrix cell.
+# Read by .github/workflows/ci.yml (test matrix) and the compatibility matrix.
+# Only list minors verified green against the full test suite.
+1.27
+1.28
+1.29

@@ -1,0 +1,5 @@
+{"login": "alice", "display_name": "Alice", "followers": 120}
+{"login": "bob", "display_name": "Bob", "followers": 34}
+{"login": "carol", "display_name": null, "followers": 7}
+{"login": "dave", "display_name": "Dave", "followers": 51}
+{"login": "erin", "display_name": "Erin", "followers": 0}

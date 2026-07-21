@@ -1,0 +1,28 @@
+# Example dlt-ops project — fixture-backed, network-free, local DuckDB.
+#
+# The [dlt_ops] table below is the project marker: `dlt-ops`
+# commands walk up from the current directory until they find a
+# .dlt/config.toml containing it.
+
+[dlt_ops]
+default_destination = "duckdb"
+default_dataset = "github_events_raw"
+# Stamped on every row by the runner (one timestamp per run). The reconciler
+# ignores it during additive drift detection and windows removal detection on
+# it. Never declared in a resource's Pydantic model.
+load_timestamp_column = "loaded_at"
+
+# One [sources.<section>] table per source. The section name equals the source
+# module stem (github_events/source/<section>.py) and the explicit
+# @dlt.source(name="<section>") value.
+
+[sources.github_events_full]
+# dlt-native source config would go here (the fixture client needs none).
+
+[sources.github_events_full.dlt_ops]
+schedule = "@daily"
+
+[sources.github_events_api]
+
+[sources.github_events_api.dlt_ops]
+schedule = "@hourly"

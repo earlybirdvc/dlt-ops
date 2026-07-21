@@ -1,0 +1,17 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "url": "https://context7.com/earlybirdvc/dlt-ops",
+  "public_key": "pk_NGbg8FRhsQlLkVD2yGm0n",
+  "projectTitle": "dlt-ops",
+  "description": "Opinionated project layout and toolchain for running many dlt sources in production: enforced layout, validation, data gates, runs ledger, backfill. Wraps dlt; moves zero rows itself.",
+  "folders": ["docs"],
+  "excludeFolders": ["site", "tests", "examples", "ci"],
+  "excludeFiles": ["AGENTS.md", "CHANGELOG.md", "CONTRIBUTING.md", "SECURITY.md"],
+  "rules": [
+    "dlt-ops is a toolchain for dlt specifically: an opinionated layout plus operational verbs. It moves zero rows (dlt owns the write), is not an orchestrator, and is not for high-load or hard-SLA systems. Never imply throughput benefits.",
+    "Adapter-gated features (runs ledger, status, checkpoints, backfill, remote clean, reconcile, quarantine) need a registered DestinationAdapter — full tier. Any destination dlt resolves runs the core loop at core tier. Degradation is loud, never silent.",
+    "dlt-ops config keys, rule IDs, and CLI flags are a closed set defined by the toolchain; the configuration reference and `validate --show-resolved-rules` are authoritative. Do not assume a key, rule ID, or flag the docs do not list.",
+    "Failure semantics are asymmetric by contract: gates that decide what data loads fail hard; observability that only records what happened never takes a healthy run down with it.",
+    "The dlt dependency is a floor (dlt>=1.27), never a cap; users own their project's dlt version."
+  ]
+}

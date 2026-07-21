@@ -1,0 +1,264 @@
+# Branch-protection expectation: `lint`, `typecheck`, `guards`, `pr-title`,
+# every `test` matrix cell (DuckDB lane, 3 Pythons x dlt minors from
+# ci/dlt-versions.txt), `integration`, and `test-windows` are REQUIRED checks
+# on main. `test-airflow`, `test-dlt-latest`, and `integration-bigquery` are
+# non-blocking (continue-on-error).
+# Python 3.14 is not in the test matrix: dlt 1.27 (latest patch 1.27.2) stops
+# declaring support at 3.13 (trove classifiers); 1.28/1.29 do declare 3.14.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run ruff check
+      - run: uv run ruff format --check
+      # GH_TOKEN lets zizmor run its online audits (known-vulnerable-actions,
+      # stale action refs) on top of the offline ones.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: uvx zizmor .github/workflows/
+
+  typecheck:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run pyrefly check
+
+  guards:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - run: bash ci/sql_boundary_guard.sh
+
+  # Squash-merge repo: the PR title becomes the commit message on main and
+  # drives release automation, so it must parse as a conventional commit.
+  pr-title:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            style
+            refactor
+            perf
+            test
+            build
+            ci
+            chore
+            revert
+
+  # Reads ci/dlt-versions.txt (single source of truth, shared with the
+  # COMPATIBILITY.md matrix) into a JSON list for the test matrix.
+  dlt-versions:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      minors: ${{ steps.read.outputs.minors }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - id: read
+        run: |
+          minors=$(jq -R -s -c 'split("\n") | map(select(length > 0 and (startswith("#") | not)))' ci/dlt-versions.txt)
+          echo "minors=$minors" >> "$GITHUB_OUTPUT"
+
+  # DuckDB lane — required. Runs with ZERO cloud credentials.
+  test:
+    needs: dlt-versions
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+        dlt: ${{ fromJSON(needs.dlt-versions.outputs.minors) }}
+    name: test (py${{ matrix.python }}, dlt ${{ matrix.dlt }})
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python }}
+      - run: uv sync --locked
+      - env:
+          DLT_MINOR: ${{ matrix.dlt }}
+        run: uv pip install "dlt~=${DLT_MINOR}.0"
+      - run: uv run --no-sync python -c "import dlt; print('dlt', dlt.__version__)"
+      - run: uv run --no-sync pytest
+
+  # Non-blocking early warning: the newest dlt on PyPI, which may be ahead of
+  # the verified matrix (the dlt dependency is floor-only). A failure here
+  # means the next dlt minor needs investigation + matrix extension
+  # before it joins ci/dlt-versions.txt (procedure in COMPATIBILITY.md).
+  test-dlt-latest:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv pip install --upgrade dlt
+      - run: uv run --no-sync python -c "import dlt; print('dlt', dlt.__version__)"
+      - run: uv run --no-sync pytest
+
+  # Non-blocking Airflow lane: the [airflow] extra's adapter surface — DAG
+  # factory (parse-purity test included), secret backend, validator rules.
+  # Airflow is deliberately NOT in the dev group; this is the only lane that
+  # installs it. The same tests skip their airflow-marked halves in the
+  # required DuckDB lane above.
+  test-airflow:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+    env:
+      AIRFLOW_HOME: ${{ github.workspace }}/.airflow-home
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+      - run: uv sync --locked --extra airflow
+      - run: uv run --no-sync python -c "import airflow; print('airflow', airflow.__version__)"
+      - run: uv run --no-sync pytest tests/test_airflow_runtime.py tests/test_orchestration.py
+
+  # Windows lane: the package does filesystem discovery and writes text files,
+  # so path semantics and the locale-default encoding are its risk profile.
+  test-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+          python-version: "3.13"
+      - run: uv sync --locked
+      - run: uv run --no-sync pytest -m "not integration"
+
+  # Required integration lane — credential-free. Runs the whole
+  # `-m integration` selection: live Postgres against the service container
+  # plus the DuckDB/filesystem end-to-end suites. BigQuery-credentialed tests
+  # self-skip without credentials; airflow-marked ones skip without the extra.
+  # Env contract: POSTGRES_URL points at the service container (the
+  # postgres_url fixture in tests/conftest.py consumes it and only falls back
+  # to docker when it is absent).
+  integration:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: dlt_ops_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      POSTGRES_URL: postgresql://postgres:postgres@localhost:5432/dlt_ops_ci
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+      - run: uv sync --locked --extra postgres
+      - run: uv run --no-sync pytest -m integration
+
+  # Non-blocking BigQuery lane. Skips cleanly when the repository secret
+  # BQ_SERVICE_ACCOUNT_JSON is absent (e.g. forks).
+  integration-bigquery:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+    env:
+      BQ_SERVICE_ACCOUNT_JSON: ${{ secrets.BQ_SERVICE_ACCOUNT_JSON }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - id: creds
+        run: |
+          if [ -n "$BQ_SERVICE_ACCOUNT_JSON" ]; then
+            echo "$BQ_SERVICE_ACCOUNT_JSON" > "$RUNNER_TEMP/bq-sa.json"
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No BQ_SERVICE_ACCOUNT_JSON secret; skipping BigQuery lane."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.creds.outputs.present == 'true'
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+      - if: steps.creds.outputs.present == 'true'
+        run: uv sync --locked --extra bigquery
+      - if: steps.creds.outputs.present == 'true'
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/bq-sa.json
+        run: uv run --no-sync pytest -m integration
