@@ -117,7 +117,7 @@ def _get_table_mapping_local(pipeline_name: str, schema_name: str) -> dict[str, 
         return None
 
     try:
-        with open(schema_path) as f:
+        with open(schema_path, encoding="utf-8") as f:
             schema = json.load(f)
         return _mapping_from_schema(schema)
     except Exception as e:
@@ -413,7 +413,7 @@ def _clean_local_state_selective(working_dir: Path, schema_name: str, resources:
 
     if state_path.exists():
         try:
-            with open(state_path) as f:
+            with open(state_path, encoding="utf-8") as f:
                 state = json.load(f)
 
             modified = False
@@ -426,7 +426,7 @@ def _clean_local_state_selective(working_dir: Path, schema_name: str, resources:
 
             if modified:
                 state["_state_version"] = state.get("_state_version", 0) + 1
-                with open(state_path, "w") as f:
+                with open(state_path, "w", encoding="utf-8") as f:
                     json.dump(state, f, indent=2, default=str)
                 cleaned.append("state.json (resource entries removed)")
                 logger.info("Updated local state.json")

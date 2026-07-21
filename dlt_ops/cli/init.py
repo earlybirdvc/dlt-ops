@@ -48,7 +48,7 @@ def _write_if_absent(path: Path, content: str, created: list[str], root: Path) -
     """Write `content` to `path` unless it already exists (never clobber)."""
     if path.exists():
         return
-    path.write_text(content)
+    path.write_text(content, encoding="utf-8")
     created.append(str(path.relative_to(root)))
 
 

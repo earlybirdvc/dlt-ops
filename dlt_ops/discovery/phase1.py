@@ -112,7 +112,7 @@ def _scan_module(py_file: Path) -> _ModuleScan:
         ValueError: the file cannot be read or parsed.
     """
     try:
-        tree = ast.parse(py_file.read_text())
+        tree = ast.parse(py_file.read_text(encoding="utf-8"))
     except (OSError, SyntaxError) as e:
         raise ValueError(f"Failed to parse {py_file.name}: {e}") from e
 
