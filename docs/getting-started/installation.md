@@ -35,11 +35,13 @@ How to install `dlt-ops`, which extra to pick, and what each choice does to the 
 
 ## Destination extras and capability tiers
 
-**Which destination you point a source at decides its capability tier, and the tier decides which features work there.** Full tier means a `DestinationAdapter` is registered for the destination; it unlocks the [six adapter-gated features](../reference/destinations.md) that speak SQL to the destination directly. Core tier runs the pipeline and everything else; the gated features refuse loudly instead of degrading silently.
+**Which destination you point a source at decides its capability tier, and the tier decides which features work there.** Core tier is every destination dlt can resolve: the run loop and everything that does not speak SQL to the destination directly — discovery, `validate`, `run`, scheduling metadata, run-trace persistence, `clean --local-only`. Full tier means a `DestinationAdapter` is registered for that destination, and it *adds* the [six adapter-gated features](../reference/destinations.md) on top.
+
+On core tier those six do not silently vanish. The split follows the failure-semantics contract: a gate your config demands — `@with_checkpoints`, assertion `quarantine`, `backfill`, `require_destination_adapter = true` — refuses at preflight before any data moves, and remote `clean` and `reconcile` refuse with a capability-specific message. Observability goes the other way: the runs ledger has nowhere to live, so its writes skip with one INFO line each and `status` reports the source as `ledger unsupported` — a stated capability fact, not an error, because nothing is broken.
 
 The tier is per destination, not per install: one project can load into full-tier DuckDB and core-tier Snowflake side by side.
 
-Object stores are core tier by construction, not "until an adapter ships": they have no SQL engine, so nothing can back the adapter-routed features. Snowflake and Databricks are core tier until a `DestinationAdapter` exists for them — first-party or third-party via entry points.
+Object stores are core tier by construction, not "until an adapter ships": they have no durable SQL engine of their own, so nothing can back the adapter-routed features. Snowflake and Databricks are core tier until a `DestinationAdapter` is registered for them — first-party, third-party via entry points, or capability-derived at runtime.
 
 [Destinations and tiers](../concepts/destinations-and-tiers.md) explains the model; the [destinations reference](../reference/destinations.md) has the full feature × tier matrix.
 
@@ -63,9 +65,7 @@ For the quickstart and any local development loop, DuckDB is the full-tier desti
 
 **The dlt dependency is a floor, never a cap: `dlt>=1.27`.** You own your project's dlt version — the package metadata will not force a resolver downgrade or block a dlt upgrade.
 
-Verification is a separate question from allowance: [the compatibility matrix](../reference/compatibility.md) records which dlt minor × destination combinations CI proves, and every feature except one runs on any dlt at or above the floor regardless.
-
-The exception is remote `clean` — it rewrites dlt-internal state tables whose layout is reverse-engineered per minor, so on an unverified dlt minor it refuses with a `CleanupUnsupportedError` instead of guessing. A newer, not-yet-verified dlt minor costs you exactly that one feature until the matrix catches up.
+Verification is a separate question from allowance: [the compatibility matrix](../reference/compatibility.md) records which dlt minor × destination combinations CI proves, and every feature runs on any dlt at or above the floor regardless. Nothing in the package gates on a list of dlt minors, so a dlt release newer than that matrix costs you nothing.
 
 ## Check the install
 

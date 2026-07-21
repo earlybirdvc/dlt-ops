@@ -98,6 +98,40 @@ The contract a destination implements to reach full tier; see [destinations and 
       show_root_heading: true
       heading_level: 3
 
+### Capability-derived adapters
+
+These names live on the `dlt_ops.destinations` subpackage rather than the top level — import them as `from dlt_ops.destinations import register_derived_adapter`. They build an adapter from the facts dlt already publishes about a destination, for engines nobody hand-wrote one for. Derivation shapes the SQL for the declared dialect; it does not verify that anyone has run it there, so registering is opt-in and logs a warning. [Derived is not the same as tested](destinations.md#derived-is-not-the-same-as-tested) is the framing to read before relying on one.
+
+::: dlt_ops.destinations.derived.register_derived_adapter
+    options:
+      show_root_heading: true
+      heading_level: 4
+
+::: dlt_ops.destinations.derived.derived_adapter
+    options:
+      show_root_heading: true
+      heading_level: 4
+
+::: dlt_ops.destinations._capabilities.derivable_destinations
+    options:
+      show_root_heading: true
+      heading_level: 4
+
+::: dlt_ops.destinations.is_capability_derived
+    options:
+      show_root_heading: true
+      heading_level: 4
+
+::: dlt_ops.destinations._capabilities.UnderivableDestinationError
+    options:
+      show_root_heading: true
+      heading_level: 4
+
+::: dlt_ops.destinations.CI_VERIFIED_DESTINATIONS
+    options:
+      show_root_heading: true
+      heading_level: 4
+
 ## Assertions
 
 Pre-load data-quality gates and the error they raise; see [assertions](../concepts/assertions.md).

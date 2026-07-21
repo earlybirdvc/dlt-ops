@@ -41,14 +41,7 @@ def render_config_toml(*, example_section: str | None = None, example_dataset: s
 default_destination = "duckdb"
 # default_dataset = "raw_data"          # project-wide dataset default
 """
-    if example_section is None:
-        body += """
-# Per-rule on/off knob for `pipeline validate` (missing entry = on):
-# [dlt_ops.rules]
-# import_safety = true
-"""
-    else:
-        body += """
+    body += """
 # Per-rule on/off knob for `pipeline validate` (missing entry = on):
 # [dlt_ops.rules]
 # import_safety = true
@@ -128,6 +121,13 @@ import pydantic
 
 
 class Event(pydantic.BaseModel):
+    # extra="forbid" is what makes this model a contract rather than a
+    # suggestion: dlt reads it as schema_contract columns="freeze", so a field
+    # the API starts sending that is not declared here fails the run. Without
+    # it Pydantic defaults to ignoring unknown fields and dlt drops them from
+    # every row in silence. The pydantic_model_forbids_extra rule enforces it.
+    model_config = pydantic.ConfigDict(extra="forbid")
+
     id: int
     kind: str
     occurred_at: datetime

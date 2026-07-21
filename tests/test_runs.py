@@ -19,10 +19,12 @@ import dlt
 import duckdb
 import pytest
 
+from dlt_ops.config import UnresolvedDestinationError
 from dlt_ops.discovery.models import Schedule, SourceConfig, ValidationContext
 from dlt_ops.discovery.runner import run_pipeline
 from dlt_ops.discovery.validators import CORE_RULES
 from dlt_ops.discovery.validators.staleness import validate_stale_sources
+from dlt_ops.preflight import MissingIncrementalCursorError
 from dlt_ops.runs.writer import RUNS_COLUMNS, RUNS_TABLE, RunsWriter, pipeline_name_for_source
 from tests.test_runner import PROJECT_CONFIG, make_source_info, simple_rows_source
 
@@ -258,6 +260,74 @@ class TestRunnerLedger:
         assert "Failed to write run-start row" not in caplog.text
         # The second run is recorded too — invisible before the fix.
         assert [row["status"] for row in _runs_rows("web_events")] == ["completed", "completed"]
+
+
+class TestSetupFailuresAreRecorded:
+    """A run that dies during setup is the case the ledger exists for.
+
+    The pre-extract `running` row is this ledger's one capability dlt's own
+    `_dlt_loads` lacks — `_dlt_loads` is written at complete_load, so it holds
+    nothing before or on failure. A run killed by an unresolvable secret never
+    reaches extract at all, so it used to exit 1 leaving no row anywhere and
+    nothing for `pipeline status` to show.
+    """
+
+    def test_source_instantiation_failure_is_recorded(self, make_project):
+        """The reported case: dlt raises inside source_fn() resolving secrets,
+        before a single resource exists."""
+
+        def unresolvable_secret_source():
+            raise RuntimeError("Missing 1 field(s) in configuration: `api_key`")
+
+        root = make_project(config=PROJECT_CONFIG)
+        info = make_source_info("secret_src", unresolvable_secret_source)
+
+        with pytest.raises(RuntimeError, match="api_key"):
+            run_pipeline(info, project_root=root)
+
+        (row,) = _runs_rows("secret_src")
+        assert row["status"] == "failed"
+        assert row["completed_at"] is not None
+        assert "api_key" in row["error_summary"]
+        assert row["records_extracted"] is None
+
+    def test_preflight_failure_is_recorded(self, make_project):
+        """Preflight runs after instantiation, so it is inside the window too."""
+        root = make_project(config=PROJECT_CONFIG)
+        info = make_source_info("preflight_src", simple_rows_source)
+        bounds = (dt.datetime(2024, 2, 1, tzinfo=dt.UTC), dt.datetime(2024, 3, 1, tzinfo=dt.UTC))
+
+        with pytest.raises(MissingIncrementalCursorError):
+            run_pipeline(info, project_root=root, bounds=bounds)
+
+        (row,) = _runs_rows("preflight_src")
+        assert row["status"] == "failed"
+        assert "incremental cursor" in row["error_summary"]
+
+    def test_unknown_resource_exit_does_not_strand_a_running_row(self, make_project):
+        """_validate_resources leaves via SystemExit, which `except Exception`
+        would miss — stranding a row that reads as a run still in flight."""
+        root = make_project(config=PROJECT_CONFIG)
+        info = make_source_info("exit_src", simple_rows_source)
+
+        with pytest.raises(SystemExit):
+            run_pipeline(info, resources=("nope",), project_root=root)
+
+        (row,) = _runs_rows("exit_src")
+        assert row["status"] == "failed", "a SystemExit left the run reading as still running"
+
+    def test_no_row_is_written_when_the_destination_never_resolves(self, make_project):
+        """The one failure class that genuinely cannot be recorded: the ledger
+        lives in the run's destination, so with no destination there is nowhere
+        to write. It must still fail loudly — the CLI turns this typed error
+        into a red one-line exit."""
+        root = make_project(config='[dlt_ops]\ndefault_dataset = "analytics"\n')
+        info = make_source_info("no_dest_src", simple_rows_source)
+
+        with pytest.raises(UnresolvedDestinationError, match="default_destination"):
+            run_pipeline(info, project_root=root)
+
+        assert _runs_rows("no_dest_src") == []
 
 
 def _staleness_ctx(root: Path, name: str = "web_events") -> ValidationContext:

@@ -10,11 +10,14 @@ through dlt's real sql_client, and the BigQuery adapter without credentials
 
 import datetime as dt
 import json
+import logging
 import os
 import re
 import subprocess
 import sys
+import typing
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
 import attrs
@@ -26,23 +29,43 @@ from dlt.destinations.exceptions import DatabaseUndefinedRelation
 from dlt_ops import DestinationAdapter
 from dlt_ops.destinations import (
     ADAPTER_GATED_FEATURES,
+    CI_VERIFIED_DESTINATIONS,
     ColumnInfo,
     Cursor,
+    UnderivableDestinationError,
     UnregisteredDestinationError,
     adapter_for_pipeline,
     core_mode_notice,
+    derivable_destinations,
+    derived_adapter,
     engine_name,
     get_adapter,
     has_adapter,
+    is_capability_derived,
+    register_derived_adapter,
 )
 from dlt_ops.destinations._base import SqlAdapterBase, _MaterializedCursor
+from dlt_ops.destinations._capabilities import derive_capabilities
 from dlt_ops.destinations.bigquery import BigQueryAdapter
 from dlt_ops.destinations.duckdb import DuckDBAdapter
+from dlt_ops.destinations.protocol import (
+    CANONICAL_IDENTIFIER_RE,
+    render_canonical_identifier,
+    render_canonical_table_ref,
+)
 from dlt_ops.plugins import names
 from dlt_ops.plugins import registry as registry_mod
 
 ADAPTERS = [DuckDBAdapter(), BigQueryAdapter()]
 ADAPTER_IDS = [adapter.name for adapter in ADAPTERS]
+
+
+@pytest.fixture
+def clean_registry():
+    """Fresh plugin registry per test — runtime adapter registrations must not leak."""
+    registry_mod._reset_for_tests()
+    yield
+    registry_mod._reset_for_tests()
 
 
 class RecordingClient:
@@ -187,16 +210,35 @@ class TestRegistrationAndProtocol:
         assert (bigquery_adapter.name, bigquery_adapter.placeholder_style) == ("bigquery", "%s")
         for adapter in ADAPTERS:
             assert adapter.supports_if_exists is True
-            assert adapter.supports_alter_add_column_if_not_exists is True
         assert duckdb_adapter.supports_create_schema_if_not_exists is True
         assert bigquery_adapter.supports_create_schema_if_not_exists is False
-        assert duckdb_adapter.timestamp_now_sql == "CURRENT_TIMESTAMP"
-        assert bigquery_adapter.timestamp_now_sql == "CURRENT_TIMESTAMP()"
+
+    def test_timestamp_fragments_are_shared_not_per_adapter(self):
+        """One canonical fragment for every adapter; the dialect writer spells it.
+
+        Each destination's native rendering (``CURRENT_TIMESTAMP()`` and its
+        interval arithmetic) is still snapshot-locked in EXPECTED_SQL — what is
+        asserted here is that no adapter restates in Python what transpilation
+        already performs.
+        """
+        for adapter in ADAPTERS:
+            assert adapter.timestamp_now_sql == "CURRENT_TIMESTAMP"
+            assert adapter.timestamp_sub_days_sql(7) == "CURRENT_TIMESTAMP - INTERVAL '7 days'"
 
     def test_column_info_is_frozen(self):
         column = ColumnInfo(name="a", data_type="VARCHAR")
         with pytest.raises(attrs.exceptions.FrozenInstanceError):
             column.name = "b"
+
+    def test_package_import_loads_no_adapter_implementation(self):
+        """Tier questions must stay cheap: answering "is there an adapter"
+        loads neither an adapter nor the transpile machinery. The derivation
+        helpers are re-exported lazily (PEP 562) for exactly this reason."""
+        code = "import json, sys, dlt_ops.destinations; print(json.dumps(sorted(sys.modules)))"
+        proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+        loaded = set(json.loads(proc.stdout))
+        implementations = {"_base", "_capabilities", "derived", "duckdb", "postgres", "bigquery"}
+        assert loaded & {f"dlt_ops.destinations.{module}" for module in implementations} == set()
 
 
 class TestCapabilityTiers:
@@ -265,6 +307,166 @@ class TestCapabilityTiers:
             assert feature in message
 
 
+class TestCapabilityDerivation:
+    """dlt publishes most of an adapter; the base reads it instead of restating it.
+
+    The derivation is offline and SDK-free (dlt synthesizes mock credentials to
+    describe a destination), so these run in the credential-free lane against
+    destinations this package ships no adapter for.
+    """
+
+    def test_dialect_is_derived_and_is_not_the_engine_name(self):
+        """The fact a hand-written adapter would most easily get wrong.
+
+        `name` is the registry key and `dialect` the transpile target; both
+        T-SQL engines prove they are two facts, not one spelled twice.
+        """
+        assert derive_capabilities("mssql").dialect == "tsql"
+        assert derive_capabilities("synapse").dialect == "tsql"
+        assert derive_capabilities("snowflake").dialect == "snowflake"
+
+    def test_derived_adapter_transpiles_into_the_derived_dialect(self):
+        """End to end: no hand-written class, and the SQL comes out native."""
+        client = RecordingClient()
+        derived_adapter("mssql").execute_sql(client, 'INSERT INTO "ds"."cp" (a, b) VALUES (?, ?)', "x", "y")
+        (_, sql, args) = client.calls[0]
+        assert sql == "INSERT INTO [ds].[cp] (a, b) VALUES (?, ?)"
+        assert args == ("x", "y")
+
+    def test_ddl_flag_comes_from_dlt_not_from_optimism(self):
+        """dlt knows which destinations reject `IF NOT EXISTS` on table DDL."""
+        assert derive_capabilities("mssql").supports_if_exists is False
+        assert derive_capabilities("duckdb").supports_if_exists is True
+
+    def test_no_if_exists_falls_back_to_probe_then_drop(self):
+        """The derived flag reaches behaviour, not just the attribute."""
+        client = RecordingClient(rows=[])  # fetch_columns finds nothing -> table absent
+        derived_adapter("mssql").drop_table_if_exists(client, "ds", "cp")
+        assert [call[0] for call in client.calls] == ["execute_query"]  # probed, never dropped
+
+    def test_placeholder_style_is_derived_from_the_dialect(self):
+        """A dialect fact, so it needs no declaring where driver and dialect agree."""
+        assert derive_capabilities("postgres").placeholder_style == "%s"
+        assert derive_capabilities("duckdb").placeholder_style == "?"
+        assert get_adapter("postgres").placeholder_style == "%s"
+
+    def test_a_driver_that_disagrees_with_its_dialect_must_declare(self):
+        """The counterexample that keeps placeholder_style declarable.
+
+        GoogleSQL writes `?`, but the DB-API behind it binds `%s` — a driver
+        fact, which no capability dlt publishes describes.
+        """
+        assert derive_capabilities("bigquery").placeholder_style == "?"
+        assert BigQueryAdapter().placeholder_style == "%s"
+
+    @pytest.mark.parametrize(
+        ("ref", "reason"),
+        [
+            ("sqlalchemy", "no sqlglot_dialect"),
+            ("weaviate", "no sqlglot_dialect"),
+            ("definitely_not_a_destination", "cannot resolve"),
+        ],
+    )
+    def test_underivable_destinations_refuse_instead_of_guessing(self, ref, reason):
+        """Never guess a dialect: SQL in the wrong dialect parses and lies.
+
+        The refusal has to be loud and specific — it names the destination, the
+        reason derivation failed, and the tier the caller falls back to.
+        """
+        assert derive_capabilities(ref) is None
+        with pytest.raises(UnderivableDestinationError) as excinfo:
+            derived_adapter(ref)
+        message = str(excinfo.value)
+        assert ref in message
+        assert reason in message
+        assert "core mode" in message
+
+    def test_a_dialect_with_unrenderable_placeholders_is_underivable(self):
+        """The dialect is declared, but its writer turns `?` into structure
+        rather than a token — deriving would emit SQL no driver can bind."""
+        assert derive_capabilities("clickhouse") is None
+
+    def test_derivation_is_opt_in(self):
+        """Publishing enough to derive is not the same as being supported.
+
+        Registration stays the tier switch, so a destination this package has
+        never run against does not silently become full tier — see
+        `register_derived_adapter` for why that matters even when derivation
+        is dialect-correct.
+        """
+        assert "filesystem" in derivable_destinations()
+        assert "snowflake" in derivable_destinations()
+        assert has_adapter("filesystem") is False
+        assert has_adapter("snowflake") is False
+
+    def test_derivable_destinations_covers_the_engines_dlt_describes(self):
+        for engine in ("snowflake", "databricks", "redshift", "athena", "mssql", "synapse", "fabric", "dremio"):
+            assert engine in derivable_destinations()
+
+    def test_registering_a_derived_adapter_reaches_full_tier(self, clean_registry):
+        """One line, no adapter class — and every gated feature lights up."""
+        register_derived_adapter("snowflake")
+        assert has_adapter("snowflake") is True
+        pipeline = SimpleNamespace(
+            pipeline_name="probe",
+            destination=SimpleNamespace(destination_type="dlt.destinations.snowflake"),
+        )
+        adapter = adapter_for_pipeline(pipeline)
+        assert adapter.name == "snowflake"
+        assert isinstance(adapter, DestinationAdapter)
+
+    def test_a_derived_adapter_satisfies_the_preflight_capability_check(self, clean_registry):
+        """Full tier means passing the same gate a hand-written adapter passes.
+
+        Preflight hard-fails a registered-but-incomplete adapter, so this is
+        what proves derivation produces a whole one rather than a plausible
+        object that fails at the first gated feature.
+        """
+        from dlt_ops.preflight import check_destination_capability
+
+        register_derived_adapter("snowflake")
+        check_destination_capability("snowflake", uses_checkpoints=True, require_adapter=True)
+
+    def test_registration_announces_itself_as_unverified(self, clean_registry, caplog):
+        """The honest signal: usable, and it says what it has not been through."""
+        with caplog.at_level(logging.WARNING):
+            register_derived_adapter("snowflake")
+        assert "capability-derived" in caplog.text
+        assert "not exercised by dlt-ops CI" in caplog.text
+        assert "'snowflake'" in caplog.text
+
+    def test_ci_verified_roster_stays_separate_from_the_registry(self):
+        """Registration answers "can this run"; this answers "has anyone checked"."""
+        assert CI_VERIFIED_DESTINATIONS == ("duckdb", "postgres")
+        assert "bigquery" not in CI_VERIFIED_DESTINATIONS  # live lane exists but is credential-gated
+
+    def test_is_capability_derived_separates_derived_from_hand_written(self):
+        assert is_capability_derived(derived_adapter("snowflake")) is True
+        assert is_capability_derived(DuckDBAdapter()) is False
+        assert is_capability_derived(BigQueryAdapter()) is False
+
+    @pytest.mark.parametrize(
+        "ident",
+        ["bad-name", "bad.name", "bad name", "x'); DROP TABLE t;--", "", '"quoted"', "`backtick`", "[bracket]"],
+    )
+    def test_derived_adapters_inherit_the_identifier_grammar(self, ident):
+        """Derivation adds capabilities; it never relaxes the injection defence.
+
+        Notably the T-SQL bracket, which is that dialect's own quoting
+        character — the grammar rejects it before any quoting happens.
+        """
+        with pytest.raises(ValueError, match="identifier"):
+            derived_adapter("mssql").render_identifier(ident)
+
+    def test_derived_adapter_binds_hostile_values_as_params(self):
+        hostile = "x'); DROP TABLE t;--"
+        client = RecordingClient()
+        derived_adapter("snowflake").execute_sql(client, 'INSERT INTO "ds"."cp" (a) VALUES (?)', hostile)
+        (_, sql, args) = client.calls[0]
+        assert hostile not in sql
+        assert args == (hostile,)
+
+
 class TestRenderIdentifier:
     @pytest.mark.parametrize("adapter", ADAPTERS, ids=ADAPTER_IDS)
     def test_valid_identifier_is_canonically_quoted(self, adapter):
@@ -285,6 +487,135 @@ class TestRenderIdentifier:
         assert adapter.render_table_ref("ds", "cp") == '"ds"."cp"'
         with pytest.raises(ValueError, match="identifier"):
             adapter.render_table_ref("ds", "cp; DROP TABLE t")
+
+
+class TestCanonicalIdentifierGrammar:
+    """The one validate-and-quote implementation the whole package shares.
+
+    Adapters render identifiers through it, and so does every other caller
+    building canonical SQL (the reconciler's detectors). A second copy is how
+    a tightened grammar stops reaching one of the SQL paths.
+    """
+
+    def test_adapters_and_reconciler_share_one_implementation(self):
+        """Not "equivalent code" — literally the same callable."""
+        from dlt_ops.reconciler.common import canonical_ident, canonical_table_ref
+
+        assert canonical_ident is render_canonical_identifier
+        assert canonical_table_ref is render_canonical_table_ref
+
+    def test_base_adapter_defaults_to_the_shared_grammar(self):
+        """A new adapter inherits the grammar instead of restating the regex."""
+        assert SqlAdapterBase._identifier_re is CANONICAL_IDENTIFIER_RE
+        for adapter in ADAPTERS:
+            assert adapter._identifier_re.pattern == CANONICAL_IDENTIFIER_RE.pattern
+
+    @pytest.mark.parametrize(
+        "ident",
+        ["bad-name", "bad.name", "bad name", "x'); DROP TABLE t;--", "", '"quoted"', "`backtick`", "a\nb"],
+        ids=["dash", "dot", "space", "injection", "empty", "dquote", "backtick", "newline"],
+    )
+    def test_rejects_anything_outside_the_grammar(self, ident):
+        with pytest.raises(ValueError, match="identifier"):
+            render_canonical_identifier(ident)
+
+    @pytest.mark.parametrize("ident", [None, 42, b"bytes", ["col"]], ids=["none", "int", "bytes", "list"])
+    def test_rejects_non_strings(self, ident):
+        """A non-string never reaches ``fullmatch`` as a coerced value."""
+        with pytest.raises(ValueError, match="identifier"):
+            render_canonical_identifier(ident)
+
+    def test_valid_identifier_is_quoted(self):
+        assert render_canonical_identifier("my_table_1") == '"my_table_1"'
+        assert render_canonical_table_ref("ds", "cp") == '"ds"."cp"'
+
+    def test_a_tightened_grammar_is_honoured(self):
+        """An adapter may narrow the grammar; nothing may widen it."""
+        lowercase_only = re.compile(r"[a-z_]+")
+        assert render_canonical_identifier("ok_name", grammar=lowercase_only) == '"ok_name"'
+        with pytest.raises(ValueError, match="must match"):
+            render_canonical_identifier("MixedCase", grammar=lowercase_only)
+
+    def test_subject_names_the_rejected_value(self):
+        """Adapters pass their own name so the error says which grammar failed."""
+        with pytest.raises(ValueError, match="invalid duckdb identifier"):
+            DuckDBAdapter().render_identifier("bad-name")
+        with pytest.raises(ValueError, match="invalid identifier"):
+            render_canonical_identifier("bad-name")
+
+
+class TestProtocolStaysAdapterAgnostic:
+    """The port must not enumerate the adapters that happen to sit behind it."""
+
+    def test_placeholder_style_is_an_open_type(self):
+        """A closed set here is a conformance wall.
+
+        An adapter whose driver binds on ':1' or '%(name)s' is a legitimate
+        implementation of this Protocol; a Literal of the first-party styles
+        makes it impossible to type-conform to the package's own public API.
+        """
+        hints = typing.get_type_hints(DestinationAdapter)
+        assert hints["placeholder_style"] is str
+
+    def test_adapter_with_an_unlisted_placeholder_style_conforms(self):
+        class NamedStyleAdapter(SqlAdapterBase):
+            name = "duckdb"
+            placeholder_style = ":1"
+            supports_if_exists = True
+            supports_create_schema_if_not_exists = True
+            timestamp_now_sql = "now()"
+
+            def timestamp_sub_days_sql(self, days):
+                return "now()"
+
+            def _columns_query(self, dataset, table):
+                return ("SELECT column_name, data_type FROM information_schema.columns WHERE table_name = ?", (table,))
+
+        assert isinstance(NamedStyleAdapter(), DestinationAdapter)
+
+    def test_every_protocol_member_has_a_consumer(self):
+        """A member no package code reads is a conformance tax, not a contract.
+
+        The Tier-2 preflight fails an adapter missing ANY Protocol member, and
+        the authoring guide tells third parties to implement the Protocol
+        structurally rather than inherit SqlAdapterBase — so each capability
+        flag is work every external adapter must do. `supports_alter_add_column
+        _if_not_exists` was carried with zero branches on it anywhere (its
+        docstring named a checkpoint `run_id` migration that does not exist —
+        the column ships in the initial CREATE TABLE). Adding a flag is cheap
+        when a consumer arrives; carrying one that has none is not.
+        """
+        from dlt_ops.preflight import _protocol_members
+
+        flags = {m for m in _protocol_members(DestinationAdapter) if m.startswith("supports_")}
+        package = Path(__file__).resolve().parent.parent / "dlt_ops"
+        sources = [p.read_text(encoding="utf-8") for p in package.rglob("*.py") if p.name != "protocol.py"]
+        for flag in sorted(flags):
+            readers = [text for text in sources if flag in text]
+            assert readers, f"Protocol member {flag!r} has no consumer in dlt_ops/ — drop it or use it"
+
+    def test_a_structural_adapter_needs_no_unused_flags(self):
+        """The removal is only real if an adapter that never heard of the flag
+        passes the capability probe."""
+        from dlt_ops.preflight import _protocol_members
+
+        assert "supports_alter_add_column_if_not_exists" not in _protocol_members(DestinationAdapter)
+
+    def test_capability_flags_are_described_not_attributed(self):
+        """Capability docs must say WHAT the flag means, not which destination
+        happens to set it — a caller reading the port should not learn the
+        adapter roster from it.
+
+        The canonical dialect is named once in the module docstring, as the
+        interchange grammar every adapter transpiles FROM; the exception proves
+        the rule.
+        """
+        from dlt_ops.destinations import protocol as protocol_mod
+
+        source = Path(protocol_mod.__file__).read_text(encoding="utf-8")
+        capability_docs = source.split("supports_if_exists: bool", 1)[1]
+        for brand in ("duckdb", "bigquery", "postgres"):
+            assert brand not in capability_docs.lower(), brand
 
 
 class TestTranspileSnapshots:
@@ -320,7 +651,6 @@ class _DollarStubAdapter(SqlAdapterBase):
     name = "duckdb"  # a real sqlglot dialect so statement.sql(...) renders
     placeholder_style = "$1"
     supports_if_exists = True
-    supports_alter_add_column_if_not_exists = True
     supports_create_schema_if_not_exists = True
     timestamp_now_sql = "now()"
     _identifier_re = re.compile(r"[A-Za-z0-9_]+")

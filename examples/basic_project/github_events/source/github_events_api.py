@@ -15,10 +15,11 @@ import dlt
 from ..resource.events import Actor, FixtureClient, events
 
 
-# schema_contract is deliberately omitted on this resource: the runtime
-# auto-applies the canonical contract ({"tables": "evolve", "columns":
-# "freeze", "data_type": "freeze"}) to any resource that does not declare one
-# (Rule 10, relaxed).
+# schema_contract is deliberately omitted on this resource: dlt derives it from
+# Actor's extra="forbid" and reaches the canonical contract ({"tables":
+# "evolve", "columns": "freeze", "data_type": "freeze"}) on its own. The sibling
+# resources spell the same literal out to show the declared form — both routes
+# land on one project policy, which is why `validate` accepts either.
 @dlt.resource(name="actors", columns=Actor, primary_key="login", write_disposition="replace")
 def actors():
     for page in FixtureClient("actors.jsonl").pages():

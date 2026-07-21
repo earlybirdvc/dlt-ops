@@ -122,7 +122,9 @@ events               2db0bb0b   2026-01-01T10:00:00+00:00 2        6          co
 events               2db0bb0b   2026-01-01T05:00:00+00:00 2        6          completed 2026-07-16 19:59:53.687949+00:00
 ```
 
-Completed rows self-prune after `cleanup_days` (7 by default) on later successful runs; `dlt-ops checkpoints cleanup --pipeline github_events_api_pipeline` removes them manually when you need state surgery.
+Completed rows self-prune after `cleanup_days` (7 by default) on later successful runs. `dlt-ops checkpoints cleanup --pipeline github_events_api_pipeline` is the manual version of the same housekeeping: it deletes the rows a successful run already marked `completed`, and nothing else. `active` rows are live resume state — the row a crashed or still-running extract resumes from — so they are kept and reported at WARNING with a count, not silently skipped. Narrow the scope with `--resource <r>`.
+
+`--include-active` is the destructive form, and the only one that can cost you data movement: it deletes every checkpoint row in scope regardless of status, so each affected resource restarts its window from the beginning and re-extracts everything the previous run already loaded. Reach for it deliberately — to abandon a resume point that is poisoned, or to clear state for a pipeline dropped outside `dlt-ops`.
 
 ## 5. Read both outcomes in the ledger
 
@@ -176,12 +178,14 @@ Fifteen rows, not twenty. Ids 5–9 (`00:00`–`04:00`) were extracted by the fa
 **The decorator order is enforced, not conventional.** Applied on top of `@dlt.resource` it would silently replace the resource with a plain generator — so it raises at import time instead, and `validate` surfaces it before any run does:
 
 ```text
-✗ 2 error(s):
+✗ 4 error(s):
   [github_events_api] import: source module github_events_api.py: module raised at import: TypeError: @with_checkpoints must be applied under @dlt.resource, not on top of it: decorate the plain generator function and let @dlt.resource wrap the result. Applied on top, it replaces the DltResource with a plain generator function, dropping the resource's name, write disposition, and hints.
   [github_events_full] import: source module github_events_full.py: module raised at import: TypeError: @with_checkpoints must be applied under @dlt.resource, not on top of it: ...
+  [github_events_api] validation_coverage: reduced rule coverage: source 'github_events_api' failed Phase-2 introspection, so it is absent from the introspected source set every source-inspecting rule iterates — those rules did not run for it. Its config, schema, resource and assertion findings are unknown, not clean. Fix the 'import' finding reported for this source to restore full coverage.
+  [github_events_full] validation_coverage: reduced rule coverage: source 'github_events_full' failed Phase-2 introspection, so it is absent from the introspected source set every source-inspecting rule iterates — those rules did not run for it. Its config, schema, resource and assertion findings are unknown, not clean. Fix the 'import' finding reported for this source to restore full coverage.
 ```
 
-Every module importing the broken resource reports the same error — the example's two sources share `resource/events.py`, so both fail at once. Put `@with_checkpoints` directly on the generator function and let `@dlt.resource` wrap the result.
+Every module importing the broken resource reports the same error — the example's two sources share `resource/events.py`, so both fail at once. Each also gets a `validation_coverage` error, because a source excluded from Phase 2 is skipped by every rule that iterates sources: four findings, one root cause. Put `@with_checkpoints` directly on the generator function and let `@dlt.resource` wrap the result.
 
 ## Where next
 

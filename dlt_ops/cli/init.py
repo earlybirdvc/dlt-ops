@@ -26,20 +26,19 @@ from dlt_ops.cli._init_templates import (
     render_example_source_module,
 )
 from dlt_ops.config import PROJECT_MARKER, RESOURCE_DIR, SOURCE_DIR
-from dlt_ops.discovery.phase1 import EXCLUDED_DIRS
 
 
 def _check_pipeline_name(name: str) -> None:
-    """Reject pipeline directory names discovery would never scan."""
+    """Reject pipeline directory names discovery would never scan.
+
+    Discovery excludes no directory by name: a leading ``.`` or ``_`` is the
+    whole name-based rule, and both are covered here — a leading ``.`` already
+    fails ``isidentifier()``.
+    """
     if not name.isidentifier() or name.startswith("_"):
         raise click.BadParameter(
             f"{name!r} is not a valid pipeline directory name: it must be a "
             f"Python identifier not starting with '_' (discovery skips the rest).",
-            param_hint="--pipeline",
-        )
-    if name in EXCLUDED_DIRS:
-        raise click.BadParameter(
-            f"{name!r} is excluded from discovery scans — pick another name.",
             param_hint="--pipeline",
         )
 

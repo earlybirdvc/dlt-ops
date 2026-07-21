@@ -15,6 +15,7 @@ import hashlib
 import os
 import sys
 import threading
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -36,6 +37,7 @@ from dlt_ops.cli.backfill import (
     parse_utc_timestamp,
 )
 from dlt_ops.cli.cli import cli
+from dlt_ops.destinations.duckdb import DuckDBAdapter
 from dlt_ops.discovery import SourceInfo
 from dlt_ops.preflight import DestinationCapabilityError
 from dlt_ops.runs.backfill_state import (
@@ -114,6 +116,26 @@ def _runs_rows(source_name: str, dataset: str = "analytics") -> list[dict[str, A
 
 def _event_ids(source_name: str, dataset: str = "analytics") -> list[int]:
     return [row[0] for row in _query(source_name, f"SELECT id FROM {dataset}.events ORDER BY id")]
+
+
+_CLAIM_UPDATE_SQL = "SET status = 'claimed'"
+"""Fragment identifying the CAS claim UPDATE inside canonical SQL."""
+
+
+def _patch_claim_update(monkeypatch: pytest.MonkeyPatch, effect: Any) -> None:
+    """Replace the CAS claim UPDATE's execution with `effect`; leave all other SQL real.
+
+    `effect` raises to simulate a transient destination error, or returns None
+    to simulate a destination that reports success and changes nothing.
+    """
+    real = DuckDBAdapter.execute_sql
+
+    def patched(self: Any, client: Any, canonical_sql: str, *params: Any) -> Any:
+        if _CLAIM_UPDATE_SQL in canonical_sql:
+            return effect()
+        return real(self, client, canonical_sql, *params)
+
+    monkeypatch.setattr(DuckDBAdapter, "execute_sql", patched)
 
 
 def _backfill(info: SourceInfo, root: Path, **overrides: Any) -> Any:
@@ -317,6 +339,137 @@ class TestResume:
                 )
 
 
+class TestClaimOutcomes:
+    """A CAS claim has three outcomes, and only one of them is a lost race.
+
+    The regression these guard: every claim failure used to be reported as
+    "another worker won", which on the single-worker CLI meant a transient DB
+    error silently skipped that chunk's time window and still exited 0.
+    """
+
+    def _seed_one_chunk(self, source_name: str) -> None:
+        with open_backfill_state(source_name, "duckdb", "analytics") as state:
+            state.ensure_table()
+            state.seed_chunks(
+                backfill_id="bfid",
+                chunks=[(day(1), day(2))],
+                backfill_from=day(1),
+                backfill_to=day(2),
+                chunk_size="1d",
+            )
+
+    def test_foreign_token_on_the_row_is_the_only_lost_race(self):
+        self._seed_one_chunk("claim_race")
+        with open_backfill_state("claim_race", "duckdb", "analytics") as state:
+            assert state.claim("bfid", "000000", claimed_by="worker-a") is True
+            # worker-a holds it now; worker-b loses the race, non-fatally.
+            assert state.claim("bfid", "000000", claimed_by="worker-b") is False
+
+    def test_missing_chunk_row_raises_instead_of_looking_like_a_lost_race(self):
+        with open_backfill_state("claim_missing", "duckdb", "analytics") as state:
+            state.ensure_table()
+            with pytest.raises(BackfillStateError, match="missing from"):
+                state.claim("bfid", "000000", claimed_by="worker-a")
+
+    def test_erroring_claim_update_aborts_and_leaves_the_chunk_visibly_unclaimed(self, make_project, monkeypatch):
+        """A rate limit / dropped connection on the CAS is a destination failure:
+        nobody holds the chunk, so the invocation must stop rather than move on."""
+        root = make_project(config=PROJECT_CONFIG)
+        info = make_source_info("claim_err", make_incremental_source("claim_err", ROWS))
+
+        def boom() -> Any:
+            raise RuntimeError("connection reset by peer")
+
+        _patch_claim_update(monkeypatch, boom)
+
+        with pytest.raises(BackfillStateError, match="never applied"):
+            _backfill(info, root, run_fn=lambda *args, **kwargs: pytest.fail("an unclaimed chunk must not run"))
+
+        assert {row["status"] for row in _chunk_rows("claim_err")} == {"pending"}
+
+    def test_silently_ineffective_claim_update_aborts_too(self, make_project, monkeypatch):
+        """Same bug with no exception to notice: a destination that reports
+        success and changes nothing. The row state is what settles it."""
+        root = make_project(config=PROJECT_CONFIG)
+        info = make_source_info("claim_noop", make_incremental_source("claim_noop", ROWS))
+        _patch_claim_update(monkeypatch, lambda: None)
+
+        with pytest.raises(BackfillStateError, match="no error"):
+            _backfill(info, root, run_fn=lambda *args, **kwargs: pytest.fail("an unclaimed chunk must not run"))
+
+        assert {row["status"] for row in _chunk_rows("claim_noop")} == {"pending"}
+
+
+class TestHeldChunkAccounting:
+    """`lost` gates the exit code, so it must mean "still not covered" — a gate
+    that cries wolf on a healthy concurrent run gets ignored like the old one."""
+
+    def _seed_two_chunks(self, source_name: str, backfill_id: str) -> None:
+        with open_backfill_state(source_name, "duckdb", "analytics") as state:
+            state.ensure_table()
+            state.seed_chunks(
+                backfill_id=backfill_id,
+                chunks=compute_chunks(day(1), day(3), dt.timedelta(days=1)),
+                backfill_from=day(1),
+                backfill_to=day(3),
+                chunk_size="1d",
+            )
+            state.claim(backfill_id, "000001", claimed_by="other-host:99")
+            state.mark_running(backfill_id, "000001", claimed_by="other-host:99")
+
+    def test_chunk_the_other_worker_finishes_counts_as_covered(self, make_project):
+        name = "held_done"
+        root = make_project(config=PROJECT_CONFIG)
+        info = make_source_info(name, make_incremental_source(name, ROWS))
+        backfill_id = backfill_id_for(name, day(1), day(3), "1d")
+        self._seed_two_chunks(name, backfill_id)
+
+        def run_fn(source, **kwargs):
+            # The other worker finishes its chunk while this one runs chunk 1.
+            with open_backfill_state(name, "duckdb", "analytics") as other:
+                other.mark_completed(backfill_id, "000001", claimed_by="other-host:99", records_loaded=1)
+            return SimpleNamespace(last_trace=None)
+
+        summary = _backfill(info, root, window_to=day(3), run_fn=run_fn)
+
+        assert (summary.completed, summary.skipped, summary.lost) == (1, 1, 0)
+        assert summary.window_covered
+
+    def test_chunk_still_running_elsewhere_stays_lost(self, make_project):
+        name = "held_stuck"
+        root = make_project(config=PROJECT_CONFIG)
+        info = make_source_info(name, make_incremental_source(name, ROWS))
+        self._seed_two_chunks(name, backfill_id_for(name, day(1), day(3), "1d"))
+
+        summary = _backfill(info, root, window_to=day(3), run_fn=lambda *a, **k: SimpleNamespace(last_trace=None))
+
+        assert (summary.completed, summary.skipped, summary.lost) == (1, 0, 1)
+        assert not summary.window_covered
+
+
+class TestInterruption:
+    def test_keyboard_interrupt_leaves_the_chunk_reclaimable(self, make_project):
+        """Ctrl-C skips `except Exception`. A row abandoned in `running` sits
+        outside the CAS target set and could never be reclaimed, so the chunk
+        must be demoted to `failed` before the interrupt propagates."""
+        root = make_project(config=PROJECT_CONFIG)
+        info = make_source_info("interrupt_rows", make_incremental_source("interrupt_rows", ROWS))
+
+        def run_fn(source, **kwargs):
+            raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            _backfill(info, root, run_fn=run_fn)
+
+        statuses = {row["chunk_id"]: row["status"] for row in _chunk_rows("interrupt_rows")}
+        assert statuses["000000"] == "failed", "an interrupted chunk must land in a reclaimable status"
+
+        # And a re-run actually reclaims it rather than reporting it lost.
+        summary = _backfill(info, root)
+        assert (summary.completed, summary.lost) == (5, 0)
+        assert _event_ids("interrupt_rows") == [1, 2, 3, 4, 5]
+
+
 class TestConcurrency:
     @pytest.mark.skipif(
         sys.platform == "win32",
@@ -364,14 +517,28 @@ class TestConcurrency:
         for thread in threads:
             thread.join()
 
-        assert not errors, f"CAS loser must be silent, got: {errors}"
+        assert not errors, f"CAS loser must be non-fatal, got: {errors}"
         chunk_starts = [start for start, _worker in executed]
         assert sorted(chunk_starts) == [day(n) for n in range(1, 6)], "every chunk exactly once"
+
+        # The tallies are not decorative: each worker's `completed` count must
+        # equal what that worker actually ran. This holds whichever way the race
+        # falls (including worker 1 draining every chunk), so it is not flaky —
+        # but it fails the moment a claim outcome is miscounted.
+        executed_by_worker = Counter(worker for _start, worker in executed)
         for worker in (1, 2):
             summary = results[worker]
             assert summary.completed + summary.skipped + summary.lost == summary.total == 5
+            assert executed_by_worker[worker] == summary.completed
         assert results[1].completed + results[2].completed == 5
-        assert {row["status"] for row in _chunk_rows("conc_rows")} == {"completed"}
+
+        rows = _chunk_rows("conc_rows")
+        assert {row["status"] for row in rows} == {"completed"}
+        # Exactly-once with ownership: the token on the row is the worker that
+        # ran the chunk — no chunk is executed by a worker that never held it.
+        owner_by_chunk_start = {start: f"worker-{worker}" for start, worker in executed}
+        for row in rows:
+            assert row["claimed_by"] == owner_by_chunk_start[row["chunk_from"].astimezone(dt.UTC)]
 
 
 def make_checkpointed_source(name: str, rows: list[dict[str, Any]]) -> Any:
@@ -600,3 +767,63 @@ class TestCliEndToEnd:
         assert _event_ids("web_events") == [1, 2]
         runs = [row for row in _runs_rows("web_events") if row["trigger_source"] == "backfill"]
         assert len(runs) == 2
+
+    def _seed_cli_window(self, backfill_id: str) -> None:
+        """Seed the plan `_VALID_WINDOW` resolves to, so a chunk can be pre-held."""
+        with open_backfill_state("web_events", "duckdb", "analytics") as state:
+            state.ensure_table()
+            state.seed_chunks(
+                backfill_id=backfill_id,
+                chunks=compute_chunks(day(1), day(3), dt.timedelta(days=1)),
+                backfill_from=day(1),
+                backfill_to=day(3),
+                chunk_size="1d",
+            )
+
+    def test_claim_failure_exits_non_zero_and_never_reports_success(self, make_project, monkeypatch):
+        """The headline regression: a transient error on the CAS UPDATE used to
+        be logged as "another worker won" and the command still exited 0 with a
+        green summary, having silently skipped the window."""
+        root = make_project(config=PROJECT_CONFIG, files={"web/source/web_events.py": INCREMENTAL_SOURCE_FILE})
+
+        def boom() -> Any:
+            raise RuntimeError("429 rate limit exceeded")
+
+        _patch_claim_update(monkeypatch, boom)
+
+        result = _invoke_backfill(root, "web_events", *_VALID_WINDOW)
+
+        assert result.exit_code == 1
+        assert "never applied" in result.output
+        assert "2 completed" not in result.output
+        assert {row["status"] for row in _chunk_rows("web_events")} == {"pending"}
+
+    def test_chunk_held_elsewhere_exits_non_zero_and_is_not_summarized_green(self, make_project):
+        """A single-worker invocation that skipped a window must not exit clean,
+        even though a chunk another worker holds is not itself a failure."""
+        root = make_project(config=PROJECT_CONFIG, files={"web/source/web_events.py": INCREMENTAL_SOURCE_FILE})
+        self._seed_cli_window(backfill_id_for("web_events", day(1), day(3), "1d"))
+        _query(
+            "web_events",
+            f"UPDATE analytics.{BACKFILLS_TABLE} SET status = 'running', claimed_by = 'other-host:99' "
+            "WHERE chunk_id = '000001'",
+        )
+
+        result = _invoke_backfill(root, "web_events", *_VALID_WINDOW)
+
+        assert result.exit_code == 1
+        assert "1 completed" in result.output and "1 claimed elsewhere" in result.output
+        assert "did not cover the whole window" in result.output
+        # The claimable chunk still ran; only the held one was left alone.
+        assert _event_ids("web_events") == [1]
+
+    def test_fully_skipped_rerun_still_exits_zero(self, make_project):
+        """`skipped` is coverage, not absence: a resume that finds everything
+        already completed has covered the window and stays green."""
+        root = make_project(config=PROJECT_CONFIG, files={"web/source/web_events.py": INCREMENTAL_SOURCE_FILE})
+        assert _invoke_backfill(root, "web_events", *_VALID_WINDOW).exit_code == 0
+
+        result = _invoke_backfill(root, "web_events", *_VALID_WINDOW)
+
+        assert result.exit_code == 0, result.output
+        assert "0 completed, 2 skipped" in result.output

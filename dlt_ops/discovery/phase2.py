@@ -9,11 +9,15 @@ Two deliberately separate steps per source module:
    are process-global and irremovable, hence the throwaway child process.
 2. In-process import to attach ``source_fn`` — callables cannot cross the
    process boundary, so the check and the attach must be separate steps.
-   This import is NOT sandboxed and runs only after the child verdict: a
-   module whose import raised in the child is excluded with a recorded
-   error and never imported here. A module that violates Rule 15 but
-   imports cleanly IS imported (its side effects run in this process); the
-   violation is reported by ``pipeline validate``, not blocked.
+   This import is NOT sandboxed and runs only after a CLEAN child verdict.
+   Anything short of clean — the module raised, the child itself failed, or
+   the child recorded Rule 15 violations — excludes the module with a
+   recorded ``import_error`` and it is never imported here. Containment is
+   the point: the child already ran the offending side effects in a
+   throwaway process, so importing the module again would fire the real
+   ``requests.get(...)`` inside whatever called ``introspect``. The
+   project-wide ``[dlt_ops.rules] import_safety = false`` knob is the only
+   opt-out; it skips the child, and with it the containment.
 
 Per-module isolation: any child or in-process failure is recorded on the
 affected sources' ``import_error``; sibling modules are unaffected and
@@ -191,10 +195,14 @@ def introspect(project_root: Path, sources: dict[str, SourceInfo]) -> dict[str, 
     """Enrich Phase-1 sources: sandbox-check, import, attach callables.
 
     With the ``import_safety`` rule on (default), each module first runs in
-    the audit-hook child; the in-process import is skipped when the child
-    reports an import failure (or the child itself fails — an unverified
-    module is not imported). With the rule off, the child is skipped and the
-    in-process import is merely guarded per module.
+    the audit-hook child and the in-process import happens only on a clean
+    verdict: a module that raised, that the child could not verify, or that
+    the child caught violating Rule 15 is recorded and never imported here.
+    With the rule off, the child is skipped and the in-process import is
+    merely guarded per module.
+
+    Phase-1 records that already carry an ``import_error`` (a module that
+    does not parse) pass straight through — there is nothing to import.
 
     Args:
         project_root: Path to the project root.
@@ -219,6 +227,10 @@ def introspect(project_root: Path, sources: dict[str, SourceInfo]) -> dict[str, 
     result: dict[str, SourceInfo] = {}
     by_module: dict[Path, list[SourceInfo]] = {}
     for info in sources.values():
+        if info.import_error is not None:
+            # Phase 1 already ruled the module out (unreadable / unparseable).
+            result[info.name] = info
+            continue
         if info.module_path is None:
             result[info.name] = attrs.evolve(info, import_error="Phase-1 record has no module_path; cannot import")
             continue
@@ -239,6 +251,15 @@ def introspect(project_root: Path, sources: dict[str, SourceInfo]) -> dict[str, 
                 error = f"import-safety check failed: {verdict.sandbox_error}"
             elif verdict.import_error is not None:
                 error = f"module raised at import: {verdict.import_error}"
+            elif violations:
+                # Containment: the child already executed these side effects
+                # once, in a process built to be thrown away. Importing the
+                # module here would run them for real in the caller.
+                findings = ", ".join(f"{v.kind} ({v.event}: {v.target})" for v in violations)
+                error = (
+                    f"not imported — violates import safety (Rule 15) at import time: {findings}. "
+                    f"Fix the module or opt out via [dlt_ops.rules] import_safety = false."
+                )
 
         module: ModuleType | None = None
         if error is None:

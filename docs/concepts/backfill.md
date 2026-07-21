@@ -85,6 +85,8 @@ import pydantic
 
 
 class PageView(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid")
+
     id: int
     occurred_at: datetime
 
@@ -177,7 +179,9 @@ Source: web_events
 
 **Two `dlt-ops pipeline backfill` invocations of the same triple — two terminals, or a retrying orchestrator task next to a manual run — coordinate exclusively through the state table.** Before executing a chunk, a worker claims it with an optimistic compare-and-swap: `UPDATE ... SET status = 'claimed', claimed_by = ? WHERE ... AND status IN ('pending', 'failed')`. Because the adapter boundary exposes no rows-affected count, the outcome is verified by reading the row back — the worker won iff `claimed_by` is its own token (`host:pid` by default).
 
-Losing is silent by design: the chunk shows up as `claimed by another worker, moving on` and lands in the summary's `claimed elsewhere` tally, which is not a failure. There are no in-process locks and no lease server; every chunk executes exactly once, and the package's concurrency tests pin exactly that.
+Losing a claim is reported, not silent. The chunk prints `held by another worker, NOT run by this invocation` and the worker carries on through the rest of the window. At the end it re-reads the state table once, because a chunk held elsewhere may have finished in the meantime: one somebody else completed reconciles to `skipped` — covered is covered — while one still uncovered by anyone counts as `lost` and denies the invocation its clean exit. The tally prints yellow, an error line names the uncovered count, and the command exits 1, because a green summary and exit 0 would tell an operator the window is backfilled when it may not be. There are no in-process locks and no lease server; every chunk executes exactly once, and the package's concurrency tests pin exactly that.
+
+Interrupts get the same care. `Ctrl-C` — or any `SystemExit` — demotes the in-flight chunk from `running` back to `failed` before the interrupt propagates, because `running` sits outside the CAS target set (`pending`, `failed`) and a row abandoned there cannot be reclaimed. One honest bound: a kill the process cannot trap — `SIGKILL`, an OOM kill, a container eviction — leaves the row in `running`, where a re-run reads it as held rather than reclaiming it. That chunk needs a manual `UPDATE` against `_dlt_backfills` to return to the pool.
 
 ## What backfill refuses to do
 

@@ -838,6 +838,69 @@ class TestRemovalDetection:
 
 
 # ---------------------------------------------------------------------------
+# Shared detection driver
+# ---------------------------------------------------------------------------
+
+
+class TestSharedDetectionDriver:
+    """Both entry points run on ``common.run_detection``.
+
+    Everything between "a source name" and "a list of findings" — bootstrap,
+    source lookup, dataset resolution, boundary acquisition, error mapping —
+    is one implementation, so the two detectors cannot drift on the failure
+    contract. What legitimately differs is asserted here too.
+    """
+
+    SOURCE = _make_source(resources={"order_items": OrderItemModel})
+
+    def _both(self, **overrides: Any) -> dict[str, Any]:
+        common: dict[str, Any] = dict(
+            dry_run=True,
+            sources={self.SOURCE.name: self.SOURCE},
+            project_config=_project_config(),
+        )
+        common.update(overrides)
+        return common
+
+    def test_unknown_source_reports_identically(self):
+        additive_result = additive_mod.reconcile_source(
+            "nope_api", fetcher=FakeSchemaFetcher({}), runner=FakeQueryRunner(), dataset="raw", **self._both()
+        )
+        removal_result = removal_mod.detect_removal("nope_api", runner=FakeQueryRunner(), dataset="raw", **self._both())
+        assert additive_result.error == removal_result.error
+        assert "not found in discovered sources" in additive_result.error
+
+    def test_unresolvable_dataset_reports_identically(self):
+        """No dataset in the config chain and no override: both fail the same."""
+        additive_result = additive_mod.reconcile_source(
+            self.SOURCE.name, fetcher=FakeSchemaFetcher({}), runner=FakeQueryRunner(), **self._both()
+        )
+        removal_result = removal_mod.detect_removal(self.SOURCE.name, runner=FakeQueryRunner(), **self._both())
+        assert additive_result.error == removal_result.error
+        assert "No dataset configured" in additive_result.error
+
+    def test_removal_skips_the_boundary_on_an_injected_runner_alone(self):
+        """Removal reads no live schema, so a runner is the whole dependency.
+
+        The project config resolves no destination, so opening the boundary
+        would surface as an error — its absence is the assertion.
+        """
+        runner = FakeQueryRunner()
+        result = removal_mod.detect_removal(self.SOURCE.name, runner=runner, dataset="raw", **self._both())
+        assert result.error is None
+        assert runner.queries  # detection actually ran
+
+    def test_additive_needs_a_fetcher_before_it_can_skip_the_boundary(self):
+        """A runner alone is not enough: the schema fetch has no stand-in, so
+        the driver falls through to the destination boundary."""
+        result = additive_mod.reconcile_source(
+            self.SOURCE.name, fetcher=None, runner=FakeQueryRunner(), dataset="raw", **self._both()
+        )
+        assert result.error is not None
+        assert "No destination configured" in result.error
+
+
+# ---------------------------------------------------------------------------
 # Emission seam
 # ---------------------------------------------------------------------------
 
@@ -1132,6 +1195,8 @@ class TestReconcilerEndToEndDuckDB:
                     import pydantic
 
                     class Widget(pydantic.BaseModel):
+                        model_config = pydantic.ConfigDict(extra="forbid")
+
                         api_id: str
                         name: str | None = None
 
@@ -1148,6 +1213,8 @@ class TestReconcilerEndToEndDuckDB:
                     import pydantic
 
                     class Widget(pydantic.BaseModel):
+                        model_config = pydantic.ConfigDict(extra="forbid")
+
                         api_id: str
                         name: str | None = None
 

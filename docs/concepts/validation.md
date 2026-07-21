@@ -10,11 +10,13 @@ The enforcement model behind `pipeline validate` and the runtime preflight that 
 
 | What it is | When each runs | Rules from | On failure | Canonical detail |
 |---|---|---|---|---|
-| Two enforcement tiers over discovery output: static `validate` (Tier 1) and a runtime preflight (Tier 2) | Tier 1 in CI / before deploy (no destination credentials); Tier 2 at the top of every `run` and `backfill` | Providers on the `dlt_ops.validators` axis — 19 `core` rules plus `bigquery`/`airflow` | Tier 1 errors fail the command (warnings only under `--strict`); Tier 2 hard-fails before extract and is not configurable | [Rules reference](../configuration/rules.md) — every rule ID, tier, and message |
+| Two enforcement tiers over discovery output: static `validate` (Tier 1) and a runtime preflight (Tier 2) | Tier 1 in CI / before deploy (no destination credentials); Tier 2 at the top of every `run` and `backfill` | Providers on the `dlt_ops.validators` axis — 21 `core` rules plus `bigquery`/`airflow` | Tier 1 errors fail the command (warnings surface only under `--strict`); Tier 2 hard-fails before extract and is not configurable | [Rules reference](../configuration/rules.md) — every rule ID, tier, and message |
 
 ## Two tiers of enforcement
 
-**Tier 1 is `pipeline validate`**: everything statically checkable — layout and naming, config sections and schedules, schema contracts, Pydantic column declarations, assertion config, destination capability, plugin registration, import safety — checked before anything runs. It is the command you put in CI and run before deploy. Findings are errors or warnings; warnings fail the command only under `--strict`, and `--json` emits machine-readable findings for CI. Tier 1 can also surface purely operational facts without gating on them: the `stale_sources` rule warns about sources that had run history and then stopped, and stays quiet when the ledger is unreachable — `validate` never requires destination credentials.
+**Tier 1 is `pipeline validate`**: everything statically checkable — layout and naming, config sections and schedules, schema contracts, Pydantic column declarations, assertion config, destination capability, plugin registration, import safety — checked before anything runs. It is the command you put in CI and run before deploy. Findings are errors or warnings, and `--json` emits them machine-readably for CI. Tier 1 can also surface purely operational facts without gating on them: the `stale_sources` rule warns about sources that had run history and then stopped, and stays quiet when the ledger is unreachable — `validate` never requires destination credentials.
+
+**`--strict` is what makes warnings visible at all, not just fatal.** A default run filters warnings out before rendering, in both the human and the `--json` output, so a project whose only findings are warnings prints `✓ All sources validated successfully` and exits 0. Three core rules emit warnings — `orphan_config_sections`, `stale_sources`, and `destination_capability` when it reports core-tier degradation — and none of them is visible without `--strict`. Run `validate --strict` when you want the operational picture; run it plain when you want the pass/fail gate.
 
 **Tier 2 is the runtime preflight**: a narrow re-check at the top of every `run` and `backfill`, because the runtime does not trust that `validate` ever ran. Production schedulers execute the run entry point directly — there is no CLI step in front of an orchestrator-triggered run, so a violated precondition must fail fast at runtime rather than degrade silently. The preflight hard-fails, before any pipeline work, on five conditions:
 
@@ -42,18 +44,18 @@ The run exits 1 before extract. A config entry that silently did nothing would b
 
 **Rules are not hard-coded into `validate`.** They arrive as specs from **providers** registered in the `dlt_ops.validators` entry-point group; a provider is a zero-argument callable returning rule specs, and installing a distribution that registers one auto-activates its rules. The package's own rules ship through the same mechanism — three first-party providers:
 
-- **`core`** — 19 rules, on by default, destination- and orchestrator-agnostic.
+- **`core`** — 21 rules, destination- and orchestrator-agnostic; all on by default except `incremental_cursor_required`.
 - **`bigquery`** — 2 rules that ship in the main distribution: AST and column-hint checks with no BigQuery SDK involved, so they resolve without the `[bigquery]` extra installed, and no-op for projects that never touch BigQuery.
 - **`airflow`** — contributes its rule only when Airflow is importable, i.e. with the `[airflow]` extra.
 
-Inspect exactly what resolved for your environment — on a bare install, 21 rules:
+Inspect exactly what resolved for your environment — on a bare install, 23 rules:
 
 ```bash
 dlt-ops pipeline validate --show-resolved-rules
 ```
 
 ```text
-Resolved rules (21):
+Resolved rules (23):
   bigquery_partitioning                on   bigquery
   bigquery_partition_hints             on   bigquery
   import_safety                        on   core
@@ -65,9 +67,11 @@ Resolved rules (21):
   no_resource_overlap                  on   core
   json_hints_for_dict_fields           on   core
   pydantic_columns_required            on   core
+  pydantic_model_forbids_extra         on   core
   schema_contract_declared             on   core
   explicit_resource_name_multi_source  on   core
   cursor_not_load_timestamp            on   core
+  incremental_cursor_required          off  core
   secret_backend_registered            on   core
   alert_sink_registered                on   core
   destination_capability               on   core
@@ -77,15 +81,15 @@ Resolved rules (21):
   assertion_predicate_resolvable       on   core
 ```
 
-(`stale_sources` shows `off` here because this project disabled it — see the next section.) The [rules reference](../configuration/rules.md) documents every rule: what it checks, why, and its error-versus-warning status.
+(`stale_sources` shows `off` here because this project disabled it — see the next section. `incremental_cursor_required` shows `off` because that is how it ships: it is the one core rule a project opts into rather than out of.) The [rules reference](../configuration/rules.md) documents every rule: what it checks, why, and its error-versus-warning status.
 
-The provider mechanism follows the plugin loader's soft-fail policy: a provider that raises on load is recorded instead of crashing validation, `--show-resolved-rules` lists it under "Unavailable rule providers", and `plugins doctor` shows the load error. A rule ID already claimed by an earlier provider is skipped and recorded — rule IDs are globally unique and stable within a major version, because the config switches key on them. Third-party distributions register providers the same way; see [plugins](plugins.md).
+The provider mechanism follows the plugin loader's soft-fail policy in one direction only: a provider that raises on load is recorded rather than crashing the process, but it is not tolerated. Its rules are missing, so `validate` reports it as an error on an ordinary run — a project silently validating against a shrunken rule set is the failure this prevents. `--show-resolved-rules` also lists it under "Unavailable rule providers", and `plugins doctor` shows the load error. A rule ID already claimed by an earlier provider is skipped and recorded — rule IDs are globally unique and stable within a major version, because the config switches key on them. Third-party distributions register providers the same way; see [plugins](plugins.md).
 
 ## Switching rules off
 
 **Two switches exist, at two scopes, and both are typo-guarded.**
 
-**Per project** — `[dlt_ops.rules]` overlays the registry defaults. A missing entry means the rule's registered default (on, for every shipped rule); `false` disables it project-wide:
+**Per project** — `[dlt_ops.rules]` overlays the registry defaults. A missing entry means the rule's registered default — on for every shipped rule except `incremental_cursor_required`, which ships off. `false` disables a rule project-wide, `true` adopts an opt-in one:
 
 ```toml
 [dlt_ops.rules]
@@ -108,7 +112,9 @@ orphan_config_sections = ""
 
 The reason string is for your reviewers, not for the tool — it turns "we disabled a check" into a documented decision that survives in config next to the source it covers.
 
-Know the limits of the switches. Import-error surfacing sits outside the rule framework: a source module that cannot import cannot run, so `validate` always reports it — no rule ID, no knob. The Tier-2 preflight is not configurable at all. And switches silence findings without changing behavior: disabling `schema_contract_declared` does not stop the runtime from applying the canonical freeze contract, and no switch teaches [discovery](discovery.md) a different layout.
+Know the limits of the switches. Import health sits outside the rule framework: a source module that cannot import cannot run, so `validate` always reports it — no rule ID, no knob — and alongside it a `validation_coverage` error names, per excluded source, the rule coverage that exclusion cost, so a shrunken pass never renders as a clean one. The Tier-2 preflight is not configurable at all. And switches silence findings without changing behavior: disabling `schema_contract_declared` does not stop the runtime from applying the canonical freeze contract to the resources it applies it to, and no switch teaches [discovery](discovery.md) a different layout.
+
+The inverse also holds, and it is the one case where silencing a rule does cost you enforcement. A Pydantic `columns=` model's contract comes from the model's own `extra` setting, which dlt reads at decoration time — the runtime deliberately does not overwrite it, since doing so would equally overrule an author's opted-in `extra="allow"`. So exempting `pydantic_model_forbids_extra` for a source leaves its models on Pydantic's default, and unknown columns on that source are dropped silently rather than failing. That is a real decision, not a formality: write the reason string accordingly.
 
 ## What `validate` refuses to do
 

@@ -8,13 +8,14 @@ description: What counts as dlt-ops public API, the 0.x stability contract, the 
 
 ## What counts as public API
 
-**Four surfaces carry the stability promise; everything else is internal — importable, but with no stability promise (see the convention note in `dlt_ops/__init__.py`).**
+**Five surfaces carry the stability promise; everything else is internal — importable, but with no stability promise (see the convention note in `dlt_ops/__init__.py`).**
 
 | Public surface | Where documented |
 |---|---|
 | Names exported from `dlt_ops` and listed in its `__all__` | [API reference](api.md) |
 | CLI commands and options of the `dlt-ops` console script | [CLI reference](cli.md) |
 | Entry-point group names (`dlt_ops.<axis>`) and the contracts plugins implement against them (`DestinationAdapter`, `Validator`, `SecretBackend`, `AlertSink`) | [Write plugins](../guides/write-plugins.md) |
+| Names exported from an explicitly-public subpackage — `dlt_ops.airflow`, and the capability-derived adapter surface on `dlt_ops.destinations` | [API reference](api.md#capability-derived-adapters) |
 | `.dlt/config.toml` keys under `[dlt_ops]` and `[sources.<name>.dlt_ops]` | [Config reference](../configuration/reference.md) |
 
 ## 0.x — unstable, breaking changes possible
@@ -30,7 +31,7 @@ description: What counts as dlt-ops public API, the 0.x stability contract, the 
 **1.0 waits on three proofs that the surface has settled:**
 
 - **2-3 third-party plugins** exercising the entry-points surface (any axis) in the wild.
-- **3+ destinations** tested in CI (DuckDB, Postgres, BigQuery today; see [compatibility](compatibility.md)).
+- **3+ destinations exercised against a live instance in blocking CI.** Two today — DuckDB and Postgres, the pair `CI_VERIFIED_DESTINATIONS` names. BigQuery has a live lane, but it is credential-gated and therefore non-blocking, so it does not count toward this bar yet. See [compatibility](compatibility.md).
 - Validator and assertion APIs mature — no known must-break redesigns outstanding.
 
 ## Deprecation policy (1.x line)

@@ -145,7 +145,7 @@ Source: demo_events  |  Findings: 0  |  Duration: 0.32s
 1 load package(s) were loaded to destination filesystem and into dataset demo_data
 ```
 
-Degradation is loud but proportionate: one WARNING at run start names everything going dark, INFO marks each skip, and ERROR stays reserved for real write failures. [Runs ledger](runs-ledger.md) covers the data model.
+Degradation is loud but proportionate: one WARNING at run start names everything going dark, each skipped ledger write logs one INFO line, and ERROR stays reserved for real write failures. The ledger is the only adapter-gated feature that skips quietly — the other five refuse, at preflight or at the destination boundary. [Runs ledger](runs-ledger.md) covers the data model.
 
 ### Run-trace persistence
 

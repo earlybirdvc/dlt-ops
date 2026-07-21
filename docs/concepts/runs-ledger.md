@@ -4,7 +4,7 @@ description: How dlt-ops records every run and backfill in a _dlt_ops_runs table
 
 # Runs ledger
 
-dlt tells you what the last run on this machine did; nothing records what ran, when, and with what outcome where the data actually lands. The runs ledger closes that gap: every `run` and `backfill` writes start and outcome rows to a `_dlt_ops_runs` table in the destination itself, and `pipeline status` reads it back. Read this to understand the data model, the write policy, and why "no rows" comes in three distinct flavors.
+Operating a fleet of scheduled sources means answering "what ran, when, and with what outcome" from wherever you happen to be standing — a CI runner, a colleague's laptop, an on-call terminal. The runs ledger puts that record where the data is: every `run` and `backfill` writes one row per run to a `_dlt_ops_runs` table in the destination itself — inserted at start, updated with the outcome at the end — and `pipeline status` reads it back, so the history survives any single machine. Read this to understand the data model, the write policy, and why "no rows" comes in three distinct flavors.
 
 **At a glance**
 
@@ -14,7 +14,9 @@ dlt tells you what the last run on this machine did; nothing records what ran, w
 
 ## The data model
 
-**Each run inserts one row with `status = "running"` after Tier-2 preflight passes and before extract, then updates that same row to a terminal status when the run ends.** There is no separate outcome row — the ledger holds one row per run, and a row still reading `running` long after its `started_at` means the process died (or lost the destination) before the terminal write.
+**Each run inserts one row with `status = "running"` as soon as the destination and dataset resolve — before the source is instantiated, before the Tier-2 preflight, and before the dlt pipeline is constructed — then updates that same row to a terminal status when the run ends.** There is no separate outcome row — the ledger holds one row per run, and a row still reading `running` long after its `started_at` means the process died (or lost the destination) before the terminal write.
+
+The insert point is that early on purpose: setup is where the failures the ledger exists to expose happen. A run that never clears preflight, and a run whose source function raises while resolving a secret, both land a `failed` row with a one-line error summary, so `pipeline status` reports them like any other failure. One class of failure stays unrecordable by construction rather than by omission: the row lives in the run's own resolved destination and dataset, so a run that cannot resolve those — `UnresolvedDestinationError`, `UnresolvedDatasetError` — has nowhere to put it. Those two surface through the command's exit code and its log output, and nowhere else.
 
 | Column | Type | Meaning |
 |---|---|---|
@@ -115,7 +117,7 @@ dlt-ops pipeline status --limit 1 --json
 ]
 ```
 
-`status` runs Phase-1 discovery only (it never imports your source code) and is strictly read-only against the destination. The ledger also feeds one Tier-1 rule: `stale_sources` warns about sources that have run history and then stopped — and stays quiet when the ledger is unreachable, because `validate` never requires destination credentials.
+`status` runs Phase-1 discovery only (it never imports your source code) and is strictly read-only against the destination. The ledger also feeds one Tier-1 rule: `stale_sources` warns about sources that have run history and then stopped — and stays quiet when the ledger is unreachable, because `validate` never requires destination credentials. Its findings are warnings, which `validate` renders only under `--strict`, so schedule that form if you want staleness surfaced.
 
 ## Three absence states
 

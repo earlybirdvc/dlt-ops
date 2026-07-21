@@ -71,7 +71,7 @@ demo/
 Three things to notice:
 
 - **The marker.** A directory is a `dlt-ops` project iff `.dlt/config.toml` exists and contains a `[dlt_ops]` table. Every command walks up from the current directory to find it (or takes `--root`).
-- **The naming chain.** `source/demo_events.py` defines `demo_events_source` decorated `@dlt.source(name="demo_events")`, configured under `[sources.demo_events]`. Module stem, function suffix, decorator name, and config section all line up — that chain is how discovery works without any registration code, and `validate` enforces every link. [Project layout](project-layout.md) covers all nine conventions.
+- **The naming chain.** `source/demo_events.py` defines `demo_events_source` decorated `@dlt.source(name="demo_events")`, configured under `[sources.demo_events]`. Module stem, function suffix, decorator name, and config section all line up — that chain is how discovery works without any registration code. `validate` enforces most of it: the decorator must name its section (`explicit_source_name`), the module stem must equal that section (`module_name_matches_section`), and the section must exist in config (`config_section_required`). The `_source` function-name suffix is the one link no rule checks — it is the fallback discovery uses when a decorator names no section, and a convention worth keeping for readers. [Project layout](project-layout.md) covers all nine conventions.
 - **The model is the schema.** `resource/events.py` declares a Pydantic `Event` model and passes it as `columns=Event`. dlt derives typed destination columns from it instead of inferring types at load time.
 
 ## Validate
@@ -94,7 +94,7 @@ Concretely, `validate`:
 - checks the naming chain above, the `[sources.<X>]` section, and the required `schedule`;
 - checks every `@dlt.resource` declares a Pydantic `columns=` model, and that any declared `schema_contract` is the canonical freeze contract (or a justified evolve opt-in);
 - checks every plugin referenced from config (destinations, secret backends, alert sinks) is actually registered and loadable;
-- flags orphan config sections, resource-name overlaps, and stale sources (had run history, then stopped).
+- flags resource-name overlaps as errors, and — under `--strict` — orphan config sections and stale sources (had run history, then stopped). Those last two are warnings, and a plain `validate` filters warnings out before printing, so the run above reports success without mentioning them. Reach for `validate --strict` when you want the operational picture rather than the pass/fail gate.
 
 See exactly which rules resolved and their on/off state:
 
@@ -103,7 +103,7 @@ dlt-ops pipeline validate --show-resolved-rules
 ```
 
 ```text
-Resolved rules (21):
+Resolved rules (23):
   bigquery_partitioning                on   bigquery
   bigquery_partition_hints             on   bigquery
   import_safety                        on   core
@@ -115,7 +115,7 @@ Resolved rules (21):
   assertion_predicate_resolvable       on   core
 ```
 
-The `core` provider owns 19 rules; the two `bigquery` rules are plugin-owned and auto-active because the BigQuery plugin loads (its rules are AST and column-hint checks with no BigQuery SDK involved, so they resolve even without the `[bigquery]` extra installed). Every rule can be disabled per project in `[dlt_ops.rules]` or exempted per source with a mandatory written reason — the [rules reference](../configuration/rules.md) covers each one.
+The `core` provider owns 21 rules; the two `bigquery` rules are plugin-owned and auto-active because the BigQuery plugin loads (its rules are AST and column-hint checks with no BigQuery SDK involved, so they resolve even without the `[bigquery]` extra installed). All but one core rule are on by default — `incremental_cursor_required` ships off, and `--show-resolved-rules` is where you discover it. Every rule can be switched per project in `[dlt_ops.rules]` or exempted per source with a mandatory written reason — the [rules reference](../configuration/rules.md) covers each one.
 
 ## Run
 
@@ -153,7 +153,7 @@ Load package 1784212832.897951 is LOADED and contains no failed jobs
 
 ## Status
 
-**Every run and backfill writes start and outcome rows to a `_dlt_ops_runs` table in the destination itself — the ledger lives where the data lands, not on the machine that triggered the run.**
+**Every run and backfill writes one row to a `_dlt_ops_runs` table in the destination itself — inserted at start, updated with the outcome at the end — so the ledger lives where the data lands, not on the machine that triggered the run.**
 
 ```bash
 dlt-ops pipeline status
@@ -326,7 +326,7 @@ Without the timestamp column the removal scan is skipped with a warning; the add
 
 ## Selective cleanup
 
-**`clean` is the selective delete dlt leaves to you — scope it to a single resource or a whole source, removed from the live destination.**
+**`clean` is the selective delete — scope it to a single resource or a whole source, removed from the live destination.**
 
 ```bash
 dlt-ops pipeline clean -s github_events_api --dry-run
@@ -349,7 +349,7 @@ Cleanup Plan:
 Dry-run mode: no changes will be made
 ```
 
-`clean` removes data tables, incremental state entries, checkpoint rows, and local working state — for the whole source or a single resource (`-r events`), which is the part dlt has no supported path for. `--dry-run` shows the plan; the real thing asks for confirmation unless you pass `--auto-approve`.
+`clean` removes data tables, incremental state entries, checkpoint rows, and local working state — for the whole source or a single resource (`-r events`). dlt's own `dlt pipeline <name> drop <resource>` already covers the destination tables and the incremental state; what `clean` adds is the dry run, the local working directory, dlt-ops' checkpoint rows, and the source-level unit. `--dry-run` shows the plan; the real thing asks for confirmation unless you pass `--auto-approve`.
 
 ## Backfill
 

@@ -201,8 +201,10 @@ def resources(ctx: click.Context, source_name: str | None, output_json: bool) ->
 @click.option("--source", "-s", "source_name", help="Source name (required in non-interactive mode)")
 @click.option("--resource", "-r", "resource_names", multiple=True, help="Resource(s) to run. Omit for all.")
 @click.option("--dataset", "-d", "dataset_name", help="Dataset override. Default: resolved from .dlt/config.toml")
-@click.option("--normalize-workers", "-n", type=int, help="Parallel normalize workers")
-@click.option("--load-workers", "-l", type=int, help="Parallel load workers (default: 3 local, 15 Airflow)")
+@click.option(
+    "--normalize-workers", "-n", type=int, help="Parallel normalize workers. Unset: 4 on DuckDB, else config.toml"
+)
+@click.option("--load-workers", "-l", type=int, help="Parallel load workers. Unset: 3 on DuckDB, else config.toml")
 @click.option("--file-max-items", "-f", type=int, help="Max rows per normalized file")
 @click.option("--interactive", "-I", is_flag=True, help="Interactive resource selection")
 @click.option("--yes", "-y", is_flag=True, help="Non-interactive mode, skip confirmations")
@@ -593,9 +595,10 @@ def clean(
 
     # Imported lazily: cleanup pulls dlt pipeline + destination-boundary
     # machinery the read-only verbs never need.
-    from dlt_ops.discovery.cleanup import CleanupUnsupportedError, clean_pipeline, get_cleanup_plan
+    from dlt_ops.discovery.cleanup import clean_pipeline, get_cleanup_plan
 
-    # Build cleanup plan (uses 3-tier table mapping fallback)
+    # Build cleanup plan — the remote half is dlt's own dry run (pipeline_drop
+    # prepared, never called), so the table list is what dlt would really drop.
     try:
         plan = get_cleanup_plan(
             source=src,
@@ -607,8 +610,6 @@ def clean(
         )
     except UnregisteredDestinationError as e:
         raise _remote_clean_refusal(destination) from e
-    except CleanupUnsupportedError as e:
-        raise click.ClickException(str(e)) from e
 
     # Display cleanup plan
     click.echo()
@@ -646,9 +647,15 @@ def clean(
         if plan["is_full"]:
             click.echo(f"          - system tables: DELETE rows from {', '.join(plan['system_tables'])}")
         else:
-            click.echo("          - state: surgical update (remove resource entries)")
+            click.echo("          - state: reset the selected resources (dlt drop, append-only)")
 
         click.echo(f"          - checkpoints for {len(plan['target_resources'])} resource(s)")
+
+    # Anything that made the plan less than complete — an unreachable
+    # destination, a resource dlt could not match — is louder than the plan
+    # itself, because the user is about to approve a destructive action.
+    for warning in plan.get("warnings", ()):
+        click.echo(click.style(f"  ! {warning}", fg="yellow"))
 
     click.echo()
 

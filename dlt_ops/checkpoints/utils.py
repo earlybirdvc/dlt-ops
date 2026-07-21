@@ -29,32 +29,62 @@ def _is_missing_table_error(error: Exception) -> bool:
     return "not found" in message or "does not exist" in message
 
 
+# `status` values written by CheckpointManager: rows start 'active' and a
+# successful run flips them to 'completed'. Only 'active' rows are resume state.
+_COMPLETED = "status = 'completed'"
+_ACTIVE = "status = 'active'"
+
+
+def _scope(pipeline_name: str, resource_name: str | None) -> tuple[list[str], list[str]]:
+    """WHERE fragments + bound params selecting one pipeline, optionally one resource."""
+    conditions = ["pipeline_name = ?"]
+    params = [pipeline_name]
+    if resource_name:
+        conditions.append("resource_name = ?")
+        params.append(resource_name)
+    return conditions, params
+
+
 def cleanup_checkpoints(
     pipeline_name: str | None = None,
     resource_name: str | None = None,
     checkpoint_table: str = DEFAULT_CHECKPOINT_TABLE,
     pipeline=None,
+    *,
+    include_active: bool = False,
 ):
-    """Clean up checkpoints for a pipeline or resource.
+    """Delete completed checkpoint rows for a pipeline or resource.
 
-    Use this when you run `dlt pipeline drop` or similar cleanup commands
-    to remove associated checkpoint data.
+    Retention housekeeping by default: only rows a successful run already
+    marked `completed` are deleted. `active` rows are live resume state — the
+    row a crashed or still-running extract resumes from — so deleting one
+    restarts that resource at its window start and silently re-extracts
+    everything the previous run already loaded. Active rows found in scope are
+    kept and reported at WARNING.
+
+    Pass `include_active=True` for the destructive form: every checkpoint row
+    in scope regardless of status. That is the surgical escape hatch —
+    abandoning a poisoned resume point, or clearing state for a pipeline
+    dropped outside `dlt-ops` — and the next run of an affected resource
+    restarts its window from the beginning.
 
     Args:
         pipeline_name: Pipeline name to clean (required if pipeline not provided)
         resource_name: Specific resource to clean (None = all resources in pipeline)
         checkpoint_table: Name of checkpoint table (default: _dlt_custom_checkpoints)
         pipeline: Optional pipeline object (avoids dlt.attach() call)
+        include_active: Also delete `active` rows, destroying resume state
+            (default: False)
 
     Examples:
-        # Clean all checkpoints for current pipeline
+        # Prune completed checkpoints for a pipeline
         cleanup_checkpoints(pipeline_name="my_pipeline")
 
-        # Clean checkpoints for specific resource
+        # Prune completed checkpoints for one resource
         cleanup_checkpoints(pipeline_name="my_pipeline", resource_name="companies_bulk")
 
-        # Pass pipeline directly (e.g., in tests)
-        cleanup_checkpoints(pipeline=my_pipeline)
+        # Wipe every row, resume state included
+        cleanup_checkpoints(pipeline_name="my_pipeline", include_active=True)
     """
     pipeline, pipeline_name = _resolve_pipeline(pipeline, pipeline_name, "cleanup_checkpoints")
 
@@ -62,28 +92,34 @@ def cleanup_checkpoints(
     table_ref = adapter.render_table_ref(pipeline.dataset_name, checkpoint_table)
     logging.info(f"[cleanup_checkpoints] Attached to dataset: {pipeline.dataset_name}")
 
-    conditions = ["pipeline_name = ?"]
-    params: list[str] = [pipeline_name]
-    if resource_name:
-        conditions.append("resource_name = ?")
-        params.append(resource_name)
+    conditions, params = _scope(pipeline_name, resource_name)
+    delete_conditions = conditions if include_active else [*conditions, _COMPLETED]
+    delete_sql = f"DELETE FROM {table_ref} WHERE {' AND '.join(delete_conditions)}"
+    kept_sql = f"SELECT COUNT(*) FROM {table_ref} WHERE {' AND '.join([*conditions, _ACTIVE])}"
 
-    delete_sql = f"DELETE FROM {table_ref} WHERE {' AND '.join(conditions)}"
+    scope = f"pipeline='{pipeline_name}'" + (f", resource='{resource_name}'" if resource_name else " (all resources)")
 
     try:
         with open_client(pipeline) as client:
             adapter.execute_sql(client, delete_sql, *params)
-        logging.info(
-            f"[cleanup_checkpoints] Deleted checkpoints for "
-            f"pipeline='{pipeline_name}'" + (f", resource='{resource_name}'" if resource_name else " (all resources)")
-        )
+            # Counted after the delete, which never touches active rows: this
+            # is what survived, not what was at risk.
+            kept = 0 if include_active else adapter.execute_query(client, kept_sql, *params).fetchone()[0]
     except Exception as e:
         # Table might not exist, which is fine
         if _is_missing_table_error(e):
             logging.info("[cleanup_checkpoints] Checkpoint table does not exist, nothing to clean")
-        else:
-            logging.error(f"[cleanup_checkpoints] Failed to delete checkpoints: {e}")
-            raise
+            return
+        logging.error(f"[cleanup_checkpoints] Failed to delete checkpoints: {e}")
+        raise
+
+    deleted = "all checkpoints" if include_active else "completed checkpoints"
+    logging.info(f"[cleanup_checkpoints] Deleted {deleted} for {scope}")
+    if kept:
+        logging.warning(
+            f"[cleanup_checkpoints] Kept {kept} active checkpoint row(s) for {scope}: they are live resume state. "
+            f"Pass include_active=True to delete them too — affected resources then restart from their window start."
+        )
 
 
 def list_checkpoints(

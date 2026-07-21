@@ -85,7 +85,7 @@ GITHUB_EVENTS_FAIL_AFTER_PAGE=3 dlt-ops pipeline run -s github_events_api -y
 RuntimeError: injected API failure after page 3 (GITHUB_EVENTS_FAIL_AFTER_PAGE)
 ```
 
-The run exits 1 at the extract step, so dlt loads nothing — but the page-2 checkpoint is already durable in the destination, and `dlt-ops checkpoints list` shows it still active:
+The run exits 1 at the extract step, so dlt loads nothing — but the page-2 checkpoint is already durable in the destination, and `dlt-ops checkpoints list --pipeline github_events_api_pipeline` shows it still active (`--pipeline` is required, and it takes the dlt pipeline name, not the dlt-ops source name):
 
 ```text
 Found 1 checkpoint(s):
@@ -148,7 +148,9 @@ The static detection has a runtime backstop: a checkpointed resource that slips 
 ✓ Cleaned up checkpoints for pipeline 'github_events_api_pipeline'
 ```
 
-Successful runs already self-prune via `cleanup_days`, so manual cleanup is for surgery — abandoning a poisoned resume point, or clearing state for a pipeline you dropped outside `dlt-ops`. `pipeline clean` includes checkpoint rows in its scope automatically, per resource or per source, alongside data tables and incremental state ([cleanup guide](../guides/cleanup.md)). The same operations are importable (`from dlt_ops import cleanup_checkpoints, list_checkpoints`) for use from your own tooling.
+`cleanup` is retention housekeeping by default: it deletes only the rows a successful run already marked `completed`. `active` rows are live resume state, so they survive and are reported at WARNING with a count — deleting one would restart that resource at its window start and silently re-extract everything the previous run loaded, which is exactly the quiet degradation the package promises not to do. Successful runs already self-prune via `cleanup_days`, so the manual verb mostly matters when you want that pruning now.
+
+`--include-active` (`include_active=True` from Python) is the destructive form: every row in scope regardless of status. That is the surgical escape hatch — abandoning a poisoned resume point, or clearing state for a pipeline dropped outside `dlt-ops` — and the next run of each affected resource restarts its window from the beginning. `pipeline clean` includes checkpoint rows in its scope automatically, per resource or per source, alongside data tables and incremental state ([cleanup guide](../guides/cleanup.md)). The same operations are importable (`from dlt_ops import cleanup_checkpoints, list_checkpoints`) for use from your own tooling.
 
 ## Where next
 

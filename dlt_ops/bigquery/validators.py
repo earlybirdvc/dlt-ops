@@ -88,8 +88,7 @@ def validate_bigquery_adapter_partitioning(ctx: ValidationContext) -> list[Valid
 
 
 def _resource_partition_columns(resource: Any) -> list[str]:
-    hints = getattr(resource, "_hints", {})
-    columns = hints.get("columns", {})
+    columns = getattr(resource, "columns", None)
     if not isinstance(columns, dict):
         return []
     return [

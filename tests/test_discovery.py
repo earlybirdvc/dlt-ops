@@ -1,3 +1,4 @@
+import logging
 import sys
 from pathlib import Path
 from textwrap import dedent
@@ -84,7 +85,6 @@ class TestSourceConfig:
         assert config.destination is None
         assert config.dataset is None
         assert config.airflow_var is None
-        assert config.airflow_var_key == "api_secret_key"
 
     def test_custom_values(self):
         config = SourceConfig(
@@ -92,13 +92,19 @@ class TestSourceConfig:
             destination="duckdb",
             dataset="legacy_export",
             airflow_var="my-api-key",
-            airflow_var_key="custom_key",
         )
         assert config.schedule == Schedule.HOURLY
         assert config.destination == "duckdb"
         assert config.dataset == "legacy_export"
         assert config.airflow_var == "my-api-key"
-        assert config.airflow_var_key == "custom_key"
+
+    def test_carries_no_plugin_owned_secret_keys(self):
+        """Core's model holds no backend trigger key — plugins read raw config.
+
+        `airflow_var_key` used to sit here with an Airflow default that nothing
+        read; the Airflow backend has always taken it off the raw ext table.
+        """
+        assert not hasattr(SourceConfig(schedule=Schedule.DAILY), "airflow_var_key")
 
     def test_immutable(self):
         config = SourceConfig(schedule=Schedule.DAILY)
@@ -332,8 +338,9 @@ class TestPhase1Discover:
         )
         assert discover(root)["shop_api"].resources == ("orders", "customers")
 
-    def test_unparseable_module_skipped_sibling_survives(self, make_project):
-        root = make_project(
+    @pytest.fixture
+    def unparseable_project(self, make_project) -> Path:
+        return make_project(
             files={
                 "mixed/source/broken.py": "def not valid python ((",
                 "mixed/source/healthy_api.py": """
@@ -345,7 +352,55 @@ class TestPhase1Discover:
                     """,
             },
         )
-        assert set(discover(root)) == {"healthy_api"}
+
+    def test_unparseable_module_skipped_sibling_survives(self, unparseable_project):
+        """Default discovery lists runnable sources only — a file that does not
+        parse declares no source. The parse-free consumers (`pipeline list`, the
+        orchestrator DAG factory) depend on this: neither may offer a task for a
+        module nobody could read."""
+        assert set(discover(unparseable_project)) == {"healthy_api"}
+
+    def test_unparseable_module_surfaces_as_import_error_record(self, unparseable_project):
+        """...but `validate` must not be blind to it: opted in, the same scan
+        yields a placeholder carrying the reason as `import_error`, the always-on
+        channel a module that raises at import already travels."""
+        sources = discover(unparseable_project, include_unloadable=True)
+        assert set(sources) == {"healthy_api", "broken"}
+
+        broken = sources["broken"]
+        assert broken.import_error is not None
+        assert "could not be parsed" in broken.import_error
+        assert "SyntaxError" in broken.import_error
+        assert broken.is_introspected is False
+        assert broken.pipeline_name == "mixed"
+        assert broken.module_stem == "broken"
+        assert broken.module_path == unparseable_project / "mixed" / "source" / "broken.py"
+        # Nothing may call into a module that does not parse.
+        assert broken.resources == ()
+        assert broken.function_name == ""
+        # The healthy sibling is untouched by the placeholder merge.
+        assert sources["healthy_api"].import_error is None
+
+    def test_unparseable_placeholder_never_displaces_a_real_source(self, make_project):
+        """A broken file whose stem collides with a parsed source's config
+        section keys off its pipeline dir instead of overwriting it."""
+        root = make_project(
+            files={
+                "alpha/source/api.py": "def not valid python ((",
+                "beta/source/beta_api.py": """
+                    import dlt
+
+                    @dlt.source(name="api")
+                    def beta_api_source():
+                        return []
+                    """,
+            },
+        )
+        sources = discover(root, include_unloadable=True)
+        assert set(sources) == {"api", "alpha.api"}
+        assert sources["api"].import_error is None
+        assert sources["api"].pipeline_name == "beta"
+        assert sources["alpha.api"].import_error is not None
 
     def test_name_falls_back_to_function_name_minus_suffix(self, make_project):
         root = make_project(
@@ -362,6 +417,63 @@ class TestPhase1Discover:
         sources = discover(root)
         assert set(sources) == {"plain_api"}
         assert sources["plain_api"].decorator_name is None
+
+
+class TestPipelineDirNaming:
+    """Discovery excludes no directory by NAME. Only two structural rules
+    decide: the '.'/'_' prefix, and a source/ dir holding a non-underscore .py.
+
+    The regression: a hardcoded set excluded `common` and `logs` — private
+    monorepo layout conventions in a package that is generic across every
+    user's project — so a pipeline legitimately named either was invisible,
+    with no warning anywhere.
+    """
+
+    SOURCE = """
+        import dlt
+
+        @dlt.resource(name="{name}_rows")
+        def rows():
+            yield {{"id": 1}}
+
+        @dlt.source(name="{name}")
+        def source_fn():
+            return rows
+    """
+
+    @pytest.mark.parametrize("dirname", ["common", "logs"])
+    def test_formerly_excluded_names_are_discovered(self, make_project, dirname):
+        root = make_project(files={f"{dirname}/source/{dirname}_api.py": self.SOURCE.format(name=f"{dirname}_api")})
+        sources = discover(root)
+
+        assert set(sources) == {f"{dirname}_api"}
+        assert sources[f"{dirname}_api"].pipeline_name == dirname
+
+    @pytest.mark.parametrize("dirname", ["__pycache__", ".dlt", "_scratch", ".hidden"])
+    def test_dot_and_underscore_prefixes_still_skipped(self, make_project, dirname):
+        """The prefix rule already covered every entry the set duplicated —
+        removing the set must not widen the scan to build artifacts."""
+        root = make_project(files={f"{dirname}/source/probe_api.py": self.SOURCE.format(name="probe_api")})
+        assert discover(root) == {}
+
+    def test_skipped_directory_leaves_a_debug_trace(self, make_project, caplog):
+        """Silent skipping is the underlying defect: a directory an operator
+        believes is a pipeline must say why it was not one."""
+        root = make_project(files={"almost/notsource/thing_api.py": self.SOURCE.format(name="thing_api")})
+
+        with caplog.at_level(logging.DEBUG, logger="dlt_ops.discovery.phase1"):
+            assert discover(root) == {}
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("almost" in message and "no source/ subdirectory" in message for message in messages)
+
+    def test_empty_source_dir_says_so(self, make_project, caplog):
+        root = make_project(files={"almost/source/_private.py": self.SOURCE.format(name="private_api")})
+
+        with caplog.at_level(logging.DEBUG, logger="dlt_ops.discovery.phase1"):
+            assert discover(root) == {}
+
+        assert any("no non-underscore .py file" in record.getMessage() for record in caplog.records)
 
 
 class TestCheckpointDetection:
@@ -587,7 +699,11 @@ class TestParseSourceConfig:
         assert result.schedule == Schedule.HOURLY
         assert result.dataset == "legacy_export"
         assert result.airflow_var == "db-export-credentials"
-        assert result.airflow_var_key == "credentials"
+        # `airflow_var_key` is present in the ext table above and deliberately
+        # not parsed: an unknown plugin key must pass through the core scan
+        # untouched rather than fail it. The Airflow backend reads it raw
+        # (tests/test_airflow_runtime.py::test_claims_with_custom_key).
+        assert not hasattr(result, "airflow_var_key")
 
     def test_parses_destination_from_dlt_ops(self):
         config = {
@@ -797,9 +913,11 @@ class TestModuleScan:
         assert scan.resources == ()
 
     def test_invalid_file_raises_value_error(self, tmp_path):
+        """The message is the bare reason — call sites supply the framing
+        (`discover` turns it into a SourceInfo.import_error naming the file)."""
         source_file = tmp_path / "invalid.py"
         source_file.write_text("this is not valid python {{{")
-        with pytest.raises(ValueError, match="Failed to parse"):
+        with pytest.raises(ValueError, match="SyntaxError"):
             _scan_module(source_file)
 
     def test_non_string_name_ignored(self, tmp_path):

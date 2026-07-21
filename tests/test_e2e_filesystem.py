@@ -70,6 +70,8 @@ import pydantic
 
 
 class Event(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid")
+
     id: int
     name: str
 

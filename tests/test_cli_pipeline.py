@@ -154,7 +154,6 @@ def cleanup_stub(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
     mod.get_cleanup_plan = get_cleanup_plan  # type: ignore[attr-defined]
     mod.clean_pipeline = clean_pipeline  # type: ignore[attr-defined]
-    mod.CleanupUnsupportedError = RuntimeError  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "dlt_ops.discovery.cleanup", mod)
     return SimpleNamespace(module=mod, calls=calls)
 

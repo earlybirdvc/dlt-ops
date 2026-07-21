@@ -83,33 +83,6 @@ def validate_schedules(ctx: ValidationContext) -> list[ValidationError]:
     return errors
 
 
-def validate_airflow_vars(ctx: ValidationContext) -> list[ValidationError]:
-    """Check if source uses secrets, airflow_var must be set.
-
-    Not a core rule: the Airflow plugin's validator group registers this as
-    `airflow_var_required` — the rule only applies to projects orchestrated
-    by Airflow.
-    """
-    errors: list[ValidationError] = []
-    sources_config = ctx.config.get("sources", {})
-
-    for name, source in ctx.sources.items():
-        section = sources_config.get(source.config_section, {})
-        ext = section.get("dlt_ops", {})
-
-        if _source_uses_secrets(source.source_fn):
-            airflow_var = ext.get("airflow_var")
-            if not airflow_var:
-                errors.append(
-                    ValidationError(
-                        source_name=name,
-                        field="airflow_var",
-                        message=f"Source uses secrets but 'airflow_var' not configured in [sources.{source.config_section}.dlt_ops]",
-                    )
-                )
-    return errors
-
-
 def validate_secret_backends(ctx: ValidationContext) -> list[ValidationError]:
     """Check each source's engaged secret backend is registered and healthy.
 

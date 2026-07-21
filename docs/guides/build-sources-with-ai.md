@@ -24,7 +24,7 @@ description: Hand dlt source-writing to your AI assistant and keep the proving f
 
 **dltHub's own numbers frame the problem this page solves.** By January 2026, 91% of new dlt pipelines were agent-authored ([dlthub.com/blog/agentic-data-engineering-course](https://dlthub.com/blog/agentic-data-engineering-course)), and dltHub puts the remaining gap plainly — "the bottleneck in data engineering has moved. It's no longer writing the code. It's trusting the code." ([dlthub.com/blog/ai-workbench](https://dlthub.com/blog/ai-workbench)). An assistant emits a `rest_api` config or a `@dlt.resource` in seconds; whether it references APIs that exist, keeps credentials out of the code, and runs its I/O where it belongs is the open question.
 
-**That question is exactly what `dlt-ops pipeline validate` answers.** It runs no model and touches no network: it scans the layout, imports each source in a sandbox, and reports structural findings — a missing column model, a missing schedule, a broken naming chain, an import-time side effect. Because the feedback is deterministic and specific, the assistant fixes it without a human decoding a traceback. dltHub sells this trust layer as a managed product; `dlt-ops` gives you an open CLI you run locally and in CI, against whatever assistant you already use ([validation](../concepts/validation.md)).
+**That question is exactly what `dlt-ops pipeline validate` answers.** It runs no model and makes no network calls of its own: it scans the layout, imports each source in a sandbox, and reports structural findings — a missing column model, a missing schedule, a broken naming chain, an import-time side effect. Because the feedback is deterministic and specific, the assistant fixes it without a human decoding a traceback. dltHub sells this trust layer as a managed product; `dlt-ops` gives you an open CLI you run locally and in CI, against whatever assistant you already use ([validation](../concepts/validation.md)).
 
 ## Ground the assistant in current APIs
 
@@ -59,6 +59,8 @@ import pydantic
 
 
 class Issue(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid")
+
     id: int
     number: int
     title: str
@@ -67,7 +69,7 @@ class Issue(pydantic.BaseModel):
 
 
 @dlt.source(name="github_issues")
-def github_issues_source():
+def github_issues_source(access_token: str = dlt.secrets.value):
     # Import rest_api INSIDE the function. A module-top-level import of it opens
     # a socket during import, which dlt-ops's import-safety rule flags.
     from dlt.sources.rest_api import RESTAPIConfig, rest_api_source
@@ -75,7 +77,7 @@ def github_issues_source():
     config: RESTAPIConfig = {
         "client": {
             "base_url": "https://api.github.com",
-            "auth": {"token": dlt.secrets["access_token"]},  # from .dlt/secrets.toml — never hardcoded
+            "auth": {"token": access_token},  # from .dlt/secrets.toml — never hardcoded
             "paginator": "header_link",
         },
         "resources": [
@@ -91,7 +93,7 @@ def github_issues_source():
     return rest_api_source(config)
 ```
 
-Two `dlt-ops` specifics the assistant must respect: import `rest_api` inside the `@dlt.source` function (its import opens a socket, which import-safety flags — see the next section), and pull the token from `dlt.secrets`, which resolves from `.dlt/secrets.toml` or the environment. For anything a REST config does not fit, the assistant writes a plain `@dlt.resource` generator instead. The worked loop below uses that custom shape so it runs offline — the `validate → fix → run` cycle is identical either way.
+Two `dlt-ops` specifics the assistant must respect: import `rest_api` inside the `@dlt.source` function (its import opens a socket, which import-safety flags — see the next section), and take the token as a source argument defaulting to `dlt.secrets.value`, which dlt resolves from `[sources.github_issues] access_token` in `.dlt/secrets.toml` or the environment. A bare `dlt.secrets["access_token"]` does *not* resolve — dlt looks the key up under the source's own section, and that is also the only shape a [secret backend](../concepts/plugins.md) can feed. For anything a REST config does not fit, the assistant writes a plain `@dlt.resource` generator instead. The worked loop below uses that custom shape so it runs offline — the `validate → fix → run` cycle is identical either way.
 
 ## Validate, fix, run — the loop that earns trust
 
@@ -108,6 +110,8 @@ import requests
 
 
 class Issue(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid")
+
     id: int
     number: int
     title: str
@@ -146,7 +150,7 @@ def github_issues_source():
     return issues
 ```
 
-**`validate` catches it with no model and no network.** It imports the module in a throwaway sandbox behind a CPython audit hook and records every network call the import makes — even though the `try/except` swallowed the result:
+**`validate` catches it with no model of its own.** It imports the module in a throwaway sandbox behind a CPython audit hook and records every network call the import makes — even though the `try/except` swallowed the result. The hook *observes*, it does not block: the call below really is made, once, by the throwaway child process. `validate` is safe to run on untrusted-shaped code only in the sense that the side effects are contained to that child and reported — not in the sense that nothing happens ([discovery](../concepts/discovery.md)):
 
 ```bash
 dlt-ops pipeline validate
@@ -154,12 +158,16 @@ dlt-ops pipeline validate
 
 ```text
 Validating sources
+Source 'github_issues' excluded from Phase 2: not imported — violates import safety (Rule 15) at import time: network (socket.getaddrinfo: api.github.com:443), network (socket.connect: ('140.82.121.6', 443)). Fix the module or opt out via [dlt_ops.rules] import_safety = false.
 
-✗ 3 error(s):
-  [github_issues] import_safety: Rule 15: network at import of github_issues.py — socket.bind(<socket.socket fd=4, family=30, type=1, proto=0, laddr=('::', 0, 0, 0)>, ('::1', 0))
+✗ 4 error(s):
+  [github_issues] import: source module github_issues.py: not imported — violates import safety (Rule 15) at import time: network (socket.getaddrinfo: api.github.com:443), network (socket.connect: ('140.82.121.6', 443)). Fix the module or opt out via [dlt_ops.rules] import_safety = false.
+  [github_issues] validation_coverage: reduced rule coverage: source 'github_issues' failed Phase-2 introspection, so it is absent from the introspected source set every source-inspecting rule iterates — those rules did not run for it. Its config, schema, resource and assertion findings are unknown, not clean. Fix the 'import' finding reported for this source to restore full coverage.
   [github_issues] import_safety: Rule 15: network at import of github_issues.py — socket.getaddrinfo(api.github.com:443)
-  [github_issues] import_safety: Rule 15: network at import of github_issues.py — socket.connect(('140.82.121.5', 443))
+  [github_issues] import_safety: Rule 15: network at import of github_issues.py — socket.connect(('140.82.121.6', 443))
 ```
+
+One problem, reported from three angles on purpose: one `import_safety` finding per offending call, a single `import:` error saying the module was withheld from the import entirely, and a `validation_coverage:` error naming what that exclusion cost. The `import:` line is why the source cannot run until it is fixed — `run` and `backfill` refuse a module Phase 2 never loaded. The `validation_coverage:` line is why you should not read the remaining output as a clean bill of health: every rule that iterates sources skipped this one, so its config, schema and assertion findings are unknown rather than absent.
 
 This is the class of bug that "runs on my laptop" and then fires on every scheduler heartbeat, from a process you never think about — no type checker or linter sees it, because the code is valid Python. [Discovery](../concepts/discovery.md) explains why the sandbox exists and what else the audit hook flags.
 

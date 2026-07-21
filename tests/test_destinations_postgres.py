@@ -85,10 +85,22 @@ class TestRegistrationAndCapabilities:
     def test_capability_surface(self, adapter):
         # Capability surface verified against live Postgres across the supported dlt range.
         assert (adapter.name, adapter.placeholder_style) == ("postgres", "%s")
+        assert adapter.dialect == "postgres"
         assert adapter.supports_if_exists is True
-        assert adapter.supports_alter_add_column_if_not_exists is True
         assert adapter.supports_create_schema_if_not_exists is True
         assert adapter.timestamp_now_sql == "CURRENT_TIMESTAMP"
+
+    def test_the_adapter_declares_nothing_but_its_name(self):
+        """Postgres is where derivation is fully load-bearing.
+
+        Its dlt capabilities carry the dialect and the DDL flags, and its
+        driver's paramstyle happens to match its dialect's convention — so the
+        whole capability surface above is derived, and the live lane below is
+        what proves the derivation right. A declaration reappearing here means
+        dlt stopped publishing something, which is worth noticing.
+        """
+        declared = {name for name in vars(PostgresAdapter) if not name.startswith("__")}
+        assert declared == {"name"}
 
 
 class TestTranspileSnapshots:

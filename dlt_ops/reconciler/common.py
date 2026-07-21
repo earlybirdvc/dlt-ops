@@ -6,6 +6,12 @@ Pydantic model dlt attached via ``columns=<Model>``, canonical-dialect
 identifier quoting, and the ``reproduce_sql`` alert sinks attach to every
 drift event.
 
+:func:`run_detection` is the shared driver both public entry points run on:
+project bootstrap, source lookup, dataset resolution, destination-boundary
+acquisition, error mapping into ``ReconcileResult.error``, and emission. Each
+detector supplies only what actually differs — its traversal, an optional
+precheck, and whether a source-level failure is its own to report.
+
 All SQL fragments produced here are CANONICAL (DuckDB dialect, double-quoted
 identifiers) per the DestinationAdapter boundary contract — the adapter owns
 transpilation to the destination-native dialect.
@@ -14,20 +20,36 @@ transpilation to the destination-native dialect.
 from __future__ import annotations
 
 import logging
-import re
+import time
+from contextlib import ExitStack
 from typing import TYPE_CHECKING, Any, Protocol
 
+import attrs
 from dlt.common.normalizers.naming.snake_case import NamingConvention
 
-from dlt_ops.discovery.models import SourceInfo
+from dlt_ops.config import (
+    ProjectConfig,
+    ProjectConfigError,
+    find_project_root,
+    load_project_config,
+    resolve_dataset,
+    resolve_destination,
+)
+from dlt_ops.destinations.protocol import render_canonical_identifier, render_canonical_table_ref
+from dlt_ops.discovery.models import SourceInfo, resolve_load_timestamp_column
+from dlt_ops.discovery.scanner import discover_sources
 from dlt_ops.pydantic_fields import extract_model_column_names
+from dlt_ops.reconciler._emission import emit_findings, resolve_sink
+from dlt_ops.reconciler.models import ReconcileResult
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from datetime import datetime
 
     import pydantic
 
-    from dlt_ops.config import ProjectConfig
+    from dlt_ops.reconciler.models import DriftFinding
+    from dlt_ops.reconciler.protocols import AlertSink, QueryRunner, SchemaFetcher
 
 
 logger = logging.getLogger(__name__)
@@ -52,12 +74,6 @@ class _Normalizer(Protocol):
 # NamingConvention from the source's own dlt Schema so a custom convention
 # cannot silently diverge from what the destination persists.
 _DEFAULT_NAMING: _Normalizer = NamingConvention()
-
-# Conservative identifier grammar shared with the first-party destination
-# adapters' render_identifier (see destinations/_base.py): dlt-normalized
-# datasets/tables/columns are snake_case, and anything outside it would not
-# be portable across destinations anyway.
-_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9_]+")
 
 
 def resolve_source_naming(source: SourceInfo) -> _Normalizer:
@@ -120,17 +136,15 @@ def destination_column_names(
     return {normalizer.normalize_identifier(name) for name in extract_model_column_names(model)}
 
 
-def configured_load_timestamp_column(project_config: "ProjectConfig") -> str | None:
+def configured_load_timestamp_column(project_config: ProjectConfig) -> str | None:
     """Non-empty project-level ``[dlt_ops] load_timestamp_column``, else None.
 
-    When set, the runner stamps it on every row, the removal
-    detector windows on it, additive sampling orders by it, and the ignored
-    set auto-registers it. Unset / empty / non-string = feature off.
+    When set, the runner stamps it on every row, the removal detector windows
+    on it, additive sampling orders by it, and the ignored set auto-registers
+    it. The ``ProjectConfig``-shaped view of the one reader
+    (``discovery.models.resolve_load_timestamp_column``).
     """
-    column = project_config.raw.get("load_timestamp_column")
-    if isinstance(column, str) and column.strip():
-        return column.strip()
-    return None
+    return resolve_load_timestamp_column(project_config.raw.get("load_timestamp_column"))
 
 
 def ignored_columns_for(
@@ -166,24 +180,23 @@ def ignored_columns_for(
     return frozenset(naming.normalize_identifier(name) for name in raw)
 
 
-def canonical_ident(ident: str) -> str:
-    """Validate ``ident`` against the shared identifier grammar and quote it.
+canonical_ident = render_canonical_identifier
+"""Validate a name against the canonical identifier grammar and quote it.
 
-    Canonical (DuckDB) double-quoting — the adapter's transpile step converts
-    it to the destination-native quoting. Quoting defends against a drifted
-    column name colliding with a reserved SQL keyword; the grammar check
-    rejects anything that could break out of the quotes. A rejected name
-    raises ``ValueError`` and lands in the caller's per-resource error
-    isolation instead of reaching SQL text.
-    """
-    if not isinstance(ident, str) or not _IDENTIFIER_RE.fullmatch(ident):
-        raise ValueError(f"invalid identifier {ident!r}: must match {_IDENTIFIER_RE.pattern}")
-    return f'"{ident}"'
+The detectors' alias for the boundary's own rule (see
+``destinations.protocol.render_canonical_identifier``) — one implementation,
+so a tightened grammar reaches the reconciler's SQL too. A rejected name
+raises ``ValueError`` and lands in the caller's per-resource error isolation
+instead of reaching SQL text.
 
+Detectors build canonical SQL as text and hand it to ``QueryRunner.query``,
+which is where the default grammar (rather than the resolved adapter's,
+possibly tighter, one) comes from: the port passes SQL, not identifiers, so
+there is no adapter to ask at these call sites.
+"""
 
-def canonical_table_ref(dataset: str, table: str) -> str:
-    """``dataset.table`` reference in canonical form; both parts validated."""
-    return f"{canonical_ident(dataset)}.{canonical_ident(table)}"
+canonical_table_ref = render_canonical_table_ref
+"""``dataset.table`` reference in canonical form; both parts validated."""
 
 
 def resource_pydantic_model(source: SourceInfo, resource_name: str) -> "type[pydantic.BaseModel] | None":
@@ -236,3 +249,175 @@ def build_reproduce_sql(
     if load_timestamp_column:
         time_predicate = f"WHERE {canonical_ident(load_timestamp_column)} >= TIMESTAMP '{first_seen_at.isoformat()}' "
     return f"SELECT {projection} FROM {canonical_table_ref(dataset, table)} {time_predicate}LIMIT 5"
+
+
+@attrs.frozen
+class DetectionContext:
+    """Everything a detector traversal needs, once :func:`run_detection` resolved it.
+
+    ``fetcher`` is optional because a detector that never reads live schemas
+    (removal windows on coverage instead) is driven with a runner alone, and
+    must not be forced to open a destination boundary it has no use for.
+    """
+
+    source: SourceInfo
+    runner: "QueryRunner"
+    dataset: str
+    project_config: ProjectConfig
+    sink: "AlertSink"
+    fetcher: "SchemaFetcher | None" = None
+
+
+def run_detection(
+    source_name: str,
+    *,
+    detect: "Callable[[DetectionContext], list[DriftFinding]]",
+    dry_run: bool,
+    sink: "AlertSink",
+    runner: "QueryRunner | None",
+    fetcher: "SchemaFetcher | None" = None,
+    needs_fetcher: bool = False,
+    dataset: str | None = None,
+    sources: dict[str, SourceInfo] | None = None,
+    project_root: Any | None = None,
+    project_config: ProjectConfig | None = None,
+    precheck: "Callable[[ProjectConfig], str | None] | None" = None,
+    source_error_context: str | None = None,
+) -> ReconcileResult:
+    """Drive one source through a detector traversal WITHOUT flushing the sink.
+
+    The caller owns the flush (see :func:`with_resolved_sink`): a single-source
+    entry point flushes per call, while a full sweep batches N calls and pays
+    the drain cost once.
+
+    Every failure mode between "a source name" and "a list of findings" is
+    handled here, identically for every detector: project bootstrap, unknown
+    source, unresolvable dataset or destination, and boundary acquisition each
+    map to a ``ReconcileResult`` carrying ``error``, never to a raise — an
+    orchestrated sweep must survive one bad source.
+
+    Args:
+        detect: The traversal. Receives a fully-resolved
+            :class:`DetectionContext` and returns findings; it owns per-resource
+            error isolation, this driver owns everything around it.
+        needs_fetcher: True when ``detect`` reads ``ctx.fetcher``, which makes
+            an injected runner alone insufficient to skip opening the
+            destination boundary.
+        precheck: Consulted after the source is known. A returned string is a
+            non-fatal degradation: detection is skipped and the result carries
+            it in ``warnings``.
+        source_error_context: Emitted as the sink error context when ``detect``
+            raises. None for a traversal that already reported the failure
+            through the sink itself — re-emitting produces two events per bug.
+    """
+    started = time.monotonic()
+
+    def _elapsed_ms() -> int:
+        return int((time.monotonic() - started) * 1000)
+
+    def _failed(message: str) -> ReconcileResult:
+        return ReconcileResult(source_name=source_name, findings=(), duration_ms=_elapsed_ms(), error=message)
+
+    try:
+        if sources is None or project_config is None:
+            root = project_root if project_root is not None else find_project_root()
+            if sources is None:
+                sources = discover_sources(root)
+            if project_config is None:
+                project_config = load_project_config(root)
+    except Exception as exc:
+        sink.emit_error(exc, source_name=source_name, context="discover_sources")
+        logger.exception("project discovery failed for source=%s", source_name)
+        return _failed(f"discover_sources failed: {exc}")
+
+    source = sources.get(source_name)
+    if source is None:
+        return _failed(f"source {source_name!r} not found in discovered sources")
+
+    if precheck is not None:
+        warning = precheck(project_config)
+        if warning is not None:
+            return ReconcileResult(
+                source_name=source_name,
+                findings=(),
+                duration_ms=_elapsed_ms(),
+                error=None,
+                warnings=(warning,),
+            )
+
+    try:
+        resolved_dataset = dataset if dataset is not None else resolve_dataset(source.config, project_config)
+    except ProjectConfigError as exc:
+        return _failed(str(exc))
+
+    with ExitStack() as stack:
+        if runner is not None and (fetcher is not None or not needs_fetcher):
+            resolved_fetcher, resolved_runner = fetcher, runner
+        else:
+            # Default path: open the source's own destination boundary
+            # (config-chain resolution; DestinationAdapter + live client).
+            try:
+                destination = resolve_destination(source.config, project_config)
+            except ProjectConfigError as exc:
+                return _failed(str(exc))
+            # Imported here so the injected-fakes path (tests) never touches
+            # pipeline construction.
+            from dlt_ops.reconciler._adapters import destination_defaults
+
+            try:
+                default_fetcher, default_runner = stack.enter_context(
+                    destination_defaults(source.name, destination, resolved_dataset)
+                )
+            except Exception as exc:
+                sink.emit_error(exc, source_name=source_name, context="open_destination")
+                logger.exception("failed to open destination for source=%s", source_name)
+                return _failed(f"failed to open destination {destination!r}: {exc}")
+            resolved_fetcher = fetcher if fetcher is not None else default_fetcher
+            resolved_runner = runner if runner is not None else default_runner
+
+        try:
+            findings = detect(
+                DetectionContext(
+                    source=source,
+                    runner=resolved_runner,
+                    dataset=resolved_dataset,
+                    project_config=project_config,
+                    sink=sink,
+                    fetcher=resolved_fetcher,
+                )
+            )
+        except Exception as exc:
+            if source_error_context is not None:
+                sink.emit_error(exc, source_name=source_name, context=source_error_context)
+            return _failed(f"source-level failure: {exc}")
+
+    if not dry_run:
+        emit_findings(sink, findings)
+
+    return ReconcileResult(
+        source_name=source_name,
+        findings=tuple(findings),
+        duration_ms=_elapsed_ms(),
+        error=None,
+    )
+
+
+def with_resolved_sink(
+    sink: "AlertSink | None",
+    *,
+    dry_run: bool,
+    project_config: ProjectConfig | None,
+    project_root: Any | None,
+    run: "Callable[[AlertSink], ReconcileResult]",
+) -> ReconcileResult:
+    """Resolve the sink for one public invocation, run ``run``, always flush.
+
+    The flush is the reason this exists: a sink with a background transport
+    queue must drain before a short-lived CLI or orchestrator task exits, so it
+    happens on every exit path including a raise.
+    """
+    resolved = resolve_sink(sink, dry_run=dry_run, project_config=project_config, project_root=project_root)
+    try:
+        return run(resolved)
+    finally:
+        resolved.flush()

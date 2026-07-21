@@ -46,6 +46,8 @@ import pydantic
 
 
 class PageView(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid")
+
     id: int
     occurred_at: datetime
 
@@ -187,7 +189,7 @@ chunk 5/5 [2026-01-05T00:00:00+00:00 → 2026-01-06T00:00:00+00:00): already com
 Backfill d7a7c6e21e0d8ecb: 0 completed, 5 skipped, 0 claimed elsewhere (5 chunks)
 ```
 
-The same `--from --to --chunk` triple always names the same backfill (`d7a7c6e21e0d8ecb` again), so re-running is a resume by construction: completed chunks skip, failed chunks retry under their original `run_id` (reusing their [checkpoint](../concepts/checkpoints.md) namespace), pending chunks run. That makes the recovery procedure for a backfill that died at chunk 3 of 40 exactly one step — run the same command again. The [concept page](../concepts/backfill.md) walks a killed-and-resumed backfill through the state table (this source's `WEB_EVENTS_FAIL_FROM` hook lets you reproduce it), and covers how two concurrent invocations of the same command coordinate through chunk claims.
+The same `--from --to --chunk` triple always names the same backfill (`d7a7c6e21e0d8ecb` again), so re-running is a resume by construction: completed chunks skip, failed chunks retry under their original `run_id` (reusing their [checkpoint](../concepts/checkpoints.md) namespace), pending chunks run. That makes the recovery procedure for a backfill that died at chunk 3 of 40 one step — run the same command again — for every death the process can observe: a chunk that raised, and a `Ctrl-C` (which demotes the in-flight chunk to `failed` on its way out). The exception is a kill the process cannot trap (`SIGKILL`, OOM, eviction), which strands its chunk in `running`; the [concept page](../concepts/backfill.md) covers that bound and the manual fix. The [concept page](../concepts/backfill.md) walks a killed-and-resumed backfill through the state table (this source's `WEB_EVENTS_FAIL_FROM` hook lets you reproduce it), and covers how two concurrent invocations of the same command coordinate through chunk claims.
 
 ## 5. The refusal: a cursor-less resource
 

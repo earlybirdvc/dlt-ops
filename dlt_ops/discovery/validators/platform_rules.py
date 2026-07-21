@@ -1,15 +1,26 @@
 """Core platform rules over pipeline source trees.
 
-AST checks scan every .py file in a pipeline directory (tests excluded) and
-never import project code; the rule IDs these validators register under live
-in ``discovery.validators.CORE_RULES``.
+Mostly AST checks: they scan every .py file in a pipeline directory (tests
+excluded) and never import project code. The exception is
+:func:`validate_incremental_cursor_required`, which reads the live resource
+rather than the source text — whether a resource carries a cursor is settled by
+``apply_hints`` and factory code an AST cannot follow, and Phase 2 has already
+imported the module. The rule IDs these validators register under live in
+``discovery.validators.CORE_RULES``.
 """
 
 import ast
+import logging
 from collections import defaultdict
 from pathlib import Path
 
-from dlt_ops.discovery.models import SourceInfo, ValidationContext, ValidationError
+from dlt_ops.discovery.models import (
+    Schedule,
+    SourceInfo,
+    ValidationContext,
+    ValidationError,
+    resolve_load_timestamp_column,
+)
 from dlt_ops.discovery.validators._common import (
     find_calls,
     get_keyword,
@@ -19,6 +30,29 @@ from dlt_ops.discovery.validators._common import (
     unique_pipeline_dirs,
 )
 from dlt_ops.schema_contracts import CANONICAL_SCHEMA_CONTRACT, EVOLVE_SCHEMA_CONTRACT
+
+logger = logging.getLogger(__name__)
+
+INCREMENTAL_CURSOR_RULE_ID = "incremental_cursor_required"
+"""Rule ID of the opt-in missing-cursor rule; the exemption message quotes it."""
+
+# Schedules that make a full refresh repeat on a cadence. @manual is excluded:
+# a source only run on demand re-reads everything when someone asks it to,
+# which is the case the rule has no opinion about.
+_RECURRING_SCHEDULES = frozenset(Schedule) - {Schedule.MANUAL}
+
+
+# The remedy for a declared-but-non-canonical contract, worded once because
+# two call sites emit it. "Omit it" is the advice in both cases, but the reason
+# splits on the columns= hint: dlt derives a contract from a Pydantic model at
+# decoration time and never leaves those resources for the runtime to fill in,
+# so citing the runtime auto-apply alone would be wrong for exactly the
+# resources `pydantic_columns_required` mandates.
+_NON_CANONICAL_REMEDY = (
+    "Omit it — with a Pydantic columns= model dlt derives the contract from the model's extra "
+    "(keep that canonical via extra='forbid'), and without one the runtime applies the canonical "
+    f"literal — or declare it inline: schema_contract={CANONICAL_SCHEMA_CONTRACT}"
+)
 
 
 def _is_dlt_resource_func(func: ast.expr) -> bool:
@@ -147,9 +181,16 @@ def _resolve_owning_source(
 def validate_schema_contract(ctx: ValidationContext) -> list[ValidationError]:
     """A declared schema_contract must be valid; an absent one is fine.
 
-    A @dlt.resource with no schema_contract passes — the runtime auto-applies
-    the canonical literal. A declared contract must be either the canonical
-    literal, or the evolve literal on a source that opted in via a non-empty
+    A @dlt.resource with no schema_contract passes, because the contract comes
+    from elsewhere either way — and which "elsewhere" depends on the columns=
+    hint. With a dict/list hint or none at all dlt derives no contract and the
+    runtime applies the canonical literal. With a Pydantic model dlt derives one
+    from the model's `extra` at decoration time, so the runtime never fills that
+    resource in; `pydantic_model_forbids_extra` is the rule that keeps the
+    derivation canonical there.
+
+    A declared contract must be either the canonical literal, or the evolve
+    literal on a source that opted in via a non-empty
     `schema_contract_evolve_reason` under [sources.<X>.dlt_ops] in
     .dlt/config.toml.
 
@@ -207,8 +248,7 @@ def validate_schema_contract(ctx: ValidationContext) -> list[ValidationError]:
                             source_name=pipeline_dir.name,
                             field=f"schema_contract.{location}",
                             message=f"@dlt.resource at {location} has non-canonical schema_contract. "
-                            f"Omit it (the runtime applies the canonical contract) or use the inline "
-                            f"literal: schema_contract={CANONICAL_SCHEMA_CONTRACT}",
+                            f"{_NON_CANONICAL_REMEDY}",
                         )
                     )
                     continue
@@ -234,8 +274,7 @@ def validate_schema_contract(ctx: ValidationContext) -> list[ValidationError]:
                         source_name=source_name,
                         field=f"schema_contract.{location}",
                         message=f"@dlt.resource at {location} has non-canonical schema_contract. "
-                        f"Omit it (the runtime applies the canonical contract) or use the inline "
-                        f"literal: schema_contract={CANONICAL_SCHEMA_CONTRACT}",
+                        f"{_NON_CANONICAL_REMEDY}",
                     )
                 )
 
@@ -280,14 +319,79 @@ def validate_resource_name_explicit_in_multi_source_dir(ctx: ValidationContext) 
 
 
 def _configured_load_timestamp_column(ctx: ValidationContext) -> str | None:
-    """Non-empty [dlt_ops] load_timestamp_column, else None."""
+    """Non-empty [dlt_ops] load_timestamp_column, else None.
+
+    The raw-config-shaped view of the one reader
+    (``discovery.models.resolve_load_timestamp_column``), so the name this rule
+    compares against is byte-for-byte the one the runner stamps.
+    """
     table = ctx.config.get("dlt_ops")
     if not isinstance(table, dict):
         return None
-    column = table.get("load_timestamp_column")
-    if isinstance(column, str) and column.strip():
-        return column
-    return None
+    return resolve_load_timestamp_column(table.get("load_timestamp_column"))
+
+
+def validate_incremental_cursor_required(ctx: ValidationContext) -> list[ValidationError]:
+    """Resources of a recurring-schedule source declare an incremental cursor.
+
+    The gap its sibling leaves: ``cursor_not_load_timestamp`` catches a WRONG
+    cursor and only when ``load_timestamp_column`` is configured, so a resource
+    with no cursor at all re-extracts everything on every run while validate
+    exits 0.
+
+    **Opt-in** (``default_on=False``). A full refresh is a legitimate choice —
+    small dimension tables are the obvious case — and nothing visible to this
+    package distinguishes "chose to full-refresh" from "forgot the cursor". So
+    the rule states a policy a project adopts, rather than a defect the package
+    can prove. Turn it on with ``[dlt_ops.rules] incremental_cursor_required =
+    true``.
+
+    Error, not warning, when it is on: ``validate_sources`` drops every warning
+    outside ``--strict``, so a warning here would be invisible in the run that
+    matters and a hard failure in the one that doesn't. There is no
+    visible-but-non-blocking severity to reach for.
+
+    Scoped to sources whose config declares a recurring schedule, because the
+    harm is a full refresh repeating on a cadence; ``@manual`` sources and
+    sources with no parsed config are out of scope. Reads the live resource
+    rather than the AST — ``apply_hints(incremental=...)`` and factory-built
+    cursors are invisible to a source-text scan, and a false "no cursor" would
+    be worse than the gap.
+
+    Granularity note: exemptions are per source, so a source mixing incremental
+    and deliberately-full-refresh resources exempts all of them together.
+    """
+    errors: list[ValidationError] = []
+
+    for name in sorted(ctx.sources):
+        source = ctx.sources[name]
+        config = source.config
+        if config is None or config.schedule not in _RECURRING_SCHEDULES:
+            continue
+        try:
+            instance = source.source_fn()
+        except Exception as exc:
+            logger.debug(f"Could not instantiate source {name} for cursor check: {exc}")
+            continue
+        for resource_name in sorted(instance.resources):
+            if getattr(instance.resources[resource_name], "incremental", None) is not None:
+                continue
+            errors.append(
+                ValidationError(
+                    source_name=name,
+                    field=f"incremental.{resource_name}",
+                    message=(
+                        f"resource '{resource_name}' declares no incremental cursor, so every "
+                        f"{config.schedule.value} run of '{name}' re-extracts it in full. Add a "
+                        f"dlt.sources.incremental cursor on the provider's business timestamp "
+                        f"(e.g. updated_at), or record the intent: "
+                        f"[sources.{name}.dlt_ops.rule_exemptions] "
+                        f'{INCREMENTAL_CURSOR_RULE_ID} = "<why a full refresh is intended>"'
+                    ),
+                )
+            )
+
+    return errors
 
 
 def validate_cursor_not_load_timestamp(ctx: ValidationContext) -> list[ValidationError]:
@@ -295,6 +399,8 @@ def validate_cursor_not_load_timestamp(ctx: ValidationContext) -> list[Validatio
 
     Reads the project-level `[dlt_ops] load_timestamp_column` key; inert
     when it is unset (no configured stamp column means nothing to guard).
+    Catches a wrong cursor only — a MISSING one is
+    :func:`validate_incremental_cursor_required`'s question, and opt-in.
     """
     column = _configured_load_timestamp_column(ctx)
     if column is None:

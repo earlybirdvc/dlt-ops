@@ -73,12 +73,26 @@ class TestScaffoldLayout:
         assert (root / "web_events" / RESOURCE_DIR).is_dir()
         assert not (root / DEFAULT_PIPELINE_NAME).exists()
 
-    @pytest.mark.parametrize("bad_name", ["_hidden", ".dotted", "has space", "common"])
+    @pytest.mark.parametrize("bad_name", ["_hidden", ".dotted", "has space"])
     def test_rejects_pipeline_names_discovery_would_skip(self, runner, tmp_path, bad_name):
         root = tmp_path / "demo"
         result = runner.invoke(cli, ["init", str(root), "--pipeline", bad_name])
         assert result.exit_code == 2
         assert not root.exists()  # nothing scaffolded on a rejected name
+
+    @pytest.mark.parametrize("name", ["common", "logs"])
+    def test_scaffolds_any_name_discovery_accepts(self, runner, tmp_path, name):
+        """No name is reserved: the scaffold's rule is exactly discovery's rule.
+
+        `common` and `logs` were once refused here while discovery excluded
+        them by name; discovery excludes nothing by name, so the scaffold
+        must produce them and they must come back out of `discover`.
+        """
+        root = tmp_path / name
+        _init(runner, root, "--pipeline", name, "--example")
+        assert (root / name / SOURCE_DIR).is_dir()
+        assert set(discover(root)) == {EXAMPLE_SOURCE_SECTION}
+        assert discover(root)[EXAMPLE_SOURCE_SECTION].pipeline_name == name
 
     def test_help_offers_no_force(self, runner):
         result = runner.invoke(cli, ["init", "--help"])

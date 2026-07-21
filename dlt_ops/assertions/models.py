@@ -13,19 +13,33 @@ Verdict handling is policy, and policy is engine-owned: plugins never see
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Literal, Protocol, runtime_checkable
+from enum import StrEnum
+from typing import Any, Protocol, runtime_checkable
 
 import attrs
 
 ASSERTION_AXIS = "assertion"
 """Plugin-registry axis; entry-point group ``dlt_ops.assertion`` (frozen)."""
 
-OnFailure = Literal["fail", "quarantine", "warn"]
 
-ON_FAILURE_VALUES: tuple[str, ...] = ("fail", "quarantine", "warn")
-"""Valid ``on_failure`` values at every level (resource default, per-assertion)."""
+class OnFailure(StrEnum):
+    """Closed vocabulary of the ``on_failure`` policy, at every level.
 
-DEFAULT_ON_FAILURE = "fail"
+    Applies identically to the resource-level default and the per-assertion
+    override. StrEnum members hash and compare as their plain string values,
+    so TOML-supplied strings and quarantine-row round-trips interoperate with
+    the members without conversion.
+    """
+
+    FAIL = "fail"
+    QUARANTINE = "quarantine"
+    WARN = "warn"
+
+
+ON_FAILURE_VALUES: tuple[str, ...] = tuple(policy.value for policy in OnFailure)
+"""Valid ``on_failure`` values in declaration order; the closed set is :class:`OnFailure`."""
+
+DEFAULT_ON_FAILURE = OnFailure.FAIL
 """Built-in default: bad data does not load, with zero side effects not asked for."""
 
 

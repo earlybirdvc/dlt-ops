@@ -1,15 +1,23 @@
 """Destination adapters — the only layer that speaks destination-native SQL.
 
 Adapter implementations (``duckdb.py``, ``bigquery.py``) are loaded lazily via
-the ``dlt_ops.destination`` entry-point group; importing this package
-pulls neither sqlglot nor any destination SDK.
+the ``dlt_ops.destination`` entry-point group; importing this package pulls no
+adapter, no transpile machinery, and no destination SDK — the tier check has
+to be cheap enough to run on every destination a project names.
 
 Adapter registration is the capability-tier switch: a destination whose engine
 name has a registered adapter runs at full tier; every other destination dlt
 can resolve runs in core mode, where the run loop works and the
 :data:`ADAPTER_GATED_FEATURES` are unavailable.
+
+An adapter no longer has to be hand-written to exist. dlt publishes most of
+what one needs per destination, so :func:`register_derived_adapter` builds and
+registers one for any destination declaring a ``sqlglot_dialect`` — see
+``derived.py`` for why that is opt-in rather than automatic, and
+:data:`CI_VERIFIED_DESTINATIONS` for the distinction it preserves.
 """
 
+import importlib
 import tempfile
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
@@ -26,18 +34,33 @@ from dlt_ops.plugins import registry as _default_registry
 
 __all__ = [
     "ADAPTER_GATED_FEATURES",
+    "CI_VERIFIED_DESTINATIONS",
     "ColumnInfo",
     "Cursor",
     "DestinationAdapter",
+    "UnderivableDestinationError",
     "UnregisteredDestinationError",
     "adapter_for_pipeline",
     "core_mode_notice",
+    "derivable_destinations",
+    "derived_adapter",
     "engine_name",
     "get_adapter",
     "has_adapter",
+    "is_capability_derived",
     "open_client",
     "open_destination_boundary",
+    "register_derived_adapter",
 ]
+
+# These live in the adapter-implementation modules, so they resolve on first
+# use (PEP 562) — importing this package must stay a metadata-only operation.
+_LAZY_EXPORTS = {
+    "UnderivableDestinationError": "dlt_ops.destinations._capabilities",
+    "derivable_destinations": "dlt_ops.destinations._capabilities",
+    "derived_adapter": "dlt_ops.destinations.derived",
+    "register_derived_adapter": "dlt_ops.destinations.derived",
+}
 
 ADAPTER_GATED_FEATURES: tuple[str, ...] = (
     "runs ledger and status",
@@ -52,6 +75,17 @@ ADAPTER_GATED_FEATURES: tuple[str, ...] = (
 Every surface that names the gated features (preflight errors, runner and
 validate warnings, verb refusals, docs) renders from this tuple — never a
 local copy, so the lists cannot drift.
+"""
+
+CI_VERIFIED_DESTINATIONS: tuple[str, ...] = ("duckdb", "postgres")
+"""Destinations whose adapter is exercised against a live instance in CI.
+
+The honest floor under every "supported" claim. A destination absent here may
+still work — ``bigquery`` has a live lane that is credential-gated and
+therefore non-blocking, and a capability-derived adapter may be perfectly
+correct — but nothing has proven it on every commit. Kept separate from the
+registry on purpose: registration answers "can this run", this answers "has
+anyone checked", and conflating them is how a package starts overclaiming.
 """
 
 
@@ -97,6 +131,18 @@ def core_mode_notice(destination: str) -> str:
         f"destination {destination!r} has no registered DestinationAdapter — running in core mode; "
         f"adapter-gated features unavailable: {', '.join(ADAPTER_GATED_FEATURES)}"
     )
+
+
+def is_capability_derived(adapter: DestinationAdapter) -> bool:
+    """Whether ``adapter`` was derived from dlt's capabilities rather than written and tested.
+
+    Takes a resolved adapter rather than a name so it never triggers a load of
+    its own. Reporting surfaces use it to qualify full tier honestly: derived
+    is usable, but it says the SQL was shaped for the declared dialect, not
+    that anyone ran it there.
+    """
+    derived_class = importlib.import_module("dlt_ops.destinations.derived").DerivedAdapter
+    return isinstance(adapter, derived_class)
 
 
 def get_adapter(name: str) -> DestinationAdapter:
@@ -173,3 +219,14 @@ def open_destination_boundary(
         adapter = adapter_for_pipeline(pipeline)
         with open_client(pipeline) as client:
             yield adapter, client
+
+
+def __getattr__(name: str) -> Any:
+    module = _LAZY_EXPORTS.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return getattr(importlib.import_module(module), name)
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_LAZY_EXPORTS))

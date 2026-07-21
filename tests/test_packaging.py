@@ -5,11 +5,12 @@
   (``[tool.hatch.version]`` in pyproject.toml). The metadata test catches both
   a broken hatch hookup and a version bump that skipped ``uv sync``.
 - COMPATIBILITY.md's verified matrix and ``ci/dlt-versions.txt`` (the single
-  source of truth for the verified dlt range) must list the same minors, and
+  source of truth for the CI-verified dlt range) must list the same minors, and
   the ``dlt`` dependency must be a floor-only constraint anchored at the oldest
-  verified minor — never an upper bound (users own their dlt version) — the
-  same one-source-of-truth pattern tests/test_cleanup.py::TestCompatGuard
-  enforces for ``dlt_ops._compat``.
+  verified minor — never an upper bound (users own their dlt version).
+- No module may gate a feature on an allowlist of dlt minors. The verified
+  matrix says what CI exercised; it must never become a runtime refusal, or a
+  fresh install breaks the day dlt ships a minor this repo has not seen.
 """
 
 import importlib.metadata
@@ -46,3 +47,17 @@ class TestCompatTable:
         pyproject = (REPO_ROOT / "pyproject.toml").read_text()
         assert f'"dlt>={minors[0]}"' in pyproject
         assert not re.search(r'"dlt>=[\d.]+,<', pyproject)
+
+    def test_no_module_gates_a_feature_on_a_dlt_minor_allowlist(self):
+        """The verified matrix is a CI fact, never a runtime ceiling.
+
+        A hardcoded set of dlt minors in package code is what made a fresh
+        install lose a feature the day dlt shipped a new minor; every verb now
+        runs on any dlt at or above the floor.
+        """
+        offenders = [
+            path.relative_to(REPO_ROOT).as_posix()
+            for path in (REPO_ROOT / "dlt_ops").rglob("*.py")
+            if re.search(r"SUPPORTED_DLT_MINORS|is_dlt_version_supported", path.read_text(encoding="utf-8"))
+        ]
+        assert offenders == []

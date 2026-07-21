@@ -6,6 +6,23 @@ from typing import Any, Protocol
 import attrs
 
 
+def resolve_load_timestamp_column(raw: Any) -> str | None:
+    """Normalize a raw ``[dlt_ops] load_timestamp_column`` value; None = feature off.
+
+    The single reading of the key, because three layers act on it and any
+    disagreement between them is a silent bug: the runner stamps the column on
+    every row, the ``cursor_not_load_timestamp`` rule compares source code
+    against it, and the reconciler both windows on it and auto-registers it as
+    an ignored column. Surrounding whitespace is stripped so all three see the
+    same column name the destination actually holds; unset, empty, blank, or
+    non-string values all read as off.
+
+    Lives here rather than in ``dlt_ops.config`` so the validator, runner, and
+    reconciler layers can each reach it without importing one another.
+    """
+    return raw.strip() if isinstance(raw, str) and raw.strip() else None
+
+
 class Schedule(str, Enum):
     """Valid schedule tags for dlt pipelines."""
 
@@ -36,8 +53,10 @@ class SourceConfig:
       [dlt_ops].default_destination (see dlt_ops.config)
     - dataset: per-source dataset override; falls back to
       [dlt_ops].default_dataset
-    - airflow_var: Airflow Variable name for secrets
-    - airflow_var_key: dlt.secrets key path (default: api_secret_key)
+    - airflow_var: Airflow Variable name, surfaced by `pipeline list`
+      / `pipeline resources`. Parsed for display only — the Airflow secret
+      backend reads its own trigger keys straight off the raw
+      [sources.X.dlt_ops] table, so core never acts on this value.
     - schema_contract_evolve_reason: opt-in for the evolve schema
       contract literal. Non-empty string = the source may declare
       `{"tables": "evolve", "columns": "evolve", "data_type": "freeze"}`
@@ -51,8 +70,7 @@ class SourceConfig:
     schedule: Schedule
     destination: str | None = None  # Destination override (project default if None)
     dataset: str | None = None  # Dataset override (project default if None)
-    airflow_var: str | None = None  # Variable name for secrets
-    airflow_var_key: str = "api_secret_key"  # dlt.secrets key
+    airflow_var: str | None = None  # Variable name for secrets (display only)
     schema_contract_evolve_reason: str | None = None
     injected_columns: tuple[str, ...] = ()
 

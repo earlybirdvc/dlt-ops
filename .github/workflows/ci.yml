@@ -134,7 +134,7 @@ jobs:
 
   # Non-blocking early warning: the newest dlt on PyPI, which may be ahead of
   # the verified matrix (the dlt dependency is floor-only). A failure here
-  # means the next dlt minor needs the state-schema diff + matrix extension
+  # means the next dlt minor needs investigation + matrix extension
   # before it joins ci/dlt-versions.txt (procedure in COMPATIBILITY.md).
   test-dlt-latest:
     runs-on: ubuntu-latest

@@ -19,6 +19,8 @@ description: The canonical destination capability-tier reference — the feature
 
 First-party adapters ship for **`duckdb`**, **`postgres`**, and **`bigquery`** as entry points, so those engine names always resolve to full tier — even when the destination's own SDK extra is not installed. A missing SDK surfaces later, at client construction, with dlt's own error; it does not change the tier.
 
+Registration is what the check consults, and it does not care where the registration came from: an entry point in an installed distribution, a runtime `dlt_ops.register`, and `register_derived_adapter` all land in the same registry and produce the same full tier. What full tier *means* for each is not identical — see [derived is not the same as tested](#derived-is-not-the-same-as-tested).
+
 ## Feature × tier matrix
 
 **The feature × tier matrix: every guaranteed surface, and which tier provides it (✓).**
@@ -63,10 +65,34 @@ Point `default_destination` (or a per-source `destination`) at `filesystem` and 
 
 ## Reaching full tier
 
-**Two ways to full tier — install a first-party adapter, or author one for your engine.**
+**Three ways to full tier — install a first-party adapter, opt into a capability-derived one, or author one for your engine.**
 
 1. **Use a first-party adapter.** Install one of `dlt-ops[duckdb]`, `[postgres]`, or `[bigquery]` and point `default_destination` (or a per-source `destination`) at `duckdb` / `postgres` / `bigquery`. DuckDB is the credential-free dev-loop destination.
-2. **Author an adapter.** Any destination reaches full tier once a `DestinationAdapter` is registered for its engine name under the `dlt_ops.destination` entry-point group. The Protocol (canonical DuckDB-dialect SQL in; transpile-and-bind at the boundary) and a worked example are in the [destination-adapter guide](../guides/write-a-destination-adapter.md).
+2. **Register a capability-derived adapter.** dlt publishes, per destination, most of what an adapter needs (see [capabilities come from dlt](../concepts/destinations-and-tiers.md#capabilities-come-from-dlt)), so for any destination that declares a `sqlglot_dialect` a whole adapter can be built from that alone — no code to write. It is opt-in, at runtime, one call: `register_derived_adapter("snowflake")`. Read the next section before you rely on one.
+3. **Author an adapter.** Any destination reaches full tier once a `DestinationAdapter` is registered for its engine name under the `dlt_ops.destination` entry-point group. The Protocol (canonical DuckDB-dialect SQL in; transpile-and-bind at the boundary) and a worked example are in the [destination-adapter guide](../guides/write-a-destination-adapter.md). Hand-writing is what you do when a *driver* fact differs from its dialect's convention — a paramstyle, NULL binding, an `information_schema` that is scoped differently.
+
+### Derived is not the same as tested
+
+**Derivation proves the SQL will be *shaped* for the right dialect. It proves nothing about whether anyone has run it there.** Those are two separate claims, and this package keeps them separate on purpose.
+
+**What CI actually verifies.** `CI_VERIFIED_DESTINATIONS` is `("duckdb", "postgres")` — the two destinations whose adapter runs against a live instance on every commit. BigQuery has a live lane too, but it is credential-gated and therefore non-blocking. That is the honest floor under any "supported" claim here.
+
+**What derivation cannot see.** Whether the driver binds parameters the way its dialect writes them, whether it can bind a typed `NULL`, whether the destination's `information_schema` has the standard shape and scope, who owns schema creation — and whether the destination's SQL client writes anywhere durable. Registering a derived adapter logs a `WARNING` naming the destination as derived and unverified, for exactly that reason. Verify the adapter-gated features against your destination before relying on them.
+
+**`filesystem` is derivable and must not be registered.** dlt gives the filesystem destination a SQL client, so a dialect derives cleanly (`duckdb`) — but that client is an ephemeral in-memory DuckDB that creates views over the bucket's files. SQL through it reads the bucket; it does not write to it. A ledger row, checkpoint, or backfill claim inserted that way lands in a database that disappears when the process exits. The [object-store note above](#object-store-destinations) stands unchanged: object stores are core tier by construction, and derivability does not alter that.
+
+**Which destinations are derivable.** `derivable_destinations()` enumerates them for the dlt version you have installed — a diagnostic surface, showing what you *could* opt into, not what is supported. Against the dlt in this project's lock file it returns fourteen: `athena`, `bigquery`, `databricks`, `dremio`, `duckdb`, `ducklake`, `fabric`, `filesystem`, `motherduck`, `mssql`, `postgres`, `redshift`, `snowflake`, `synapse`. Three of those are the first-party adapters; one is `filesystem`, above. The remaining ten are derivable and unverified — usable, at your own verification.
+
+**Two destinations dlt ships are not derivable**, and `register_derived_adapter` raises `UnderivableDestinationError` rather than guessing a dialect that would produce SQL which parses and silently means something else:
+
+| Destination | Why it cannot be derived |
+|---|---|
+| `clickhouse` | Its dialect is declared, but sqlglot's ClickHouse writer renders a positional placeholder as `{?: }` — a form that carries structure inline and is not usable as a substituted token. |
+| `sqlalchemy` | Its dlt capabilities declare no `sqlglot_dialect`, so there is no transpile target to read. It fronts many engines, and which one is a runtime fact rather than a published capability. |
+
+Both reach full tier the normal way, by hand-writing an adapter that declares the missing fact.
+
+**Nothing derives automatically.** Registration is always a call you make, so "dlt publishes enough to derive this" is never silently read as "this package supports it". `is_capability_derived(adapter)` answers, for a resolved adapter, which kind you are running.
 
 ## Demanding full tier: `require_destination_adapter`
 
@@ -81,4 +107,4 @@ With the knob set, a resolved destination with no registered adapter is a hard *
 
 ## Future work
 
-**dlt can expose read-only SQL over a filesystem via DuckDB views, which could someday back a read-only adapter split** that gives `status` and `reconcile` on the object-store destinations above; no protocol change ships now.
+**dlt exposes read-only SQL over a filesystem via DuckDB views, which could someday back a read-only adapter split** that gives `status` and `reconcile` on the object-store destinations above. That is exactly the capability described in [derived is not the same as tested](#derived-is-not-the-same-as-tested): the SQL client reads the bucket well and writes nowhere durable, so the useful split is read-only verbs, not the full six. No protocol change ships now.

@@ -156,7 +156,11 @@ class TestPartitionHintsValidator:
         )
 
     def _fake_resource(self, columns: dict):
-        return SimpleNamespace(_hints={"columns": columns})
+        # Mirrors dlt's public `columns` property, which is what the validator
+        # reads. dlt normalizes `columns=` into this dict at decoration time and
+        # returns it unchanged — `x-`-prefixed hints included — so a stand-in
+        # carrying the dict is faithful to a real DltResource.
+        return SimpleNamespace(columns=columns)
 
     def test_partition_hint_passes(self, tmp_path):
         res = self._fake_resource({"ingested_at": {"data_type": "timestamp", "partition": True}})

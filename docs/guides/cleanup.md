@@ -1,5 +1,5 @@
 ---
-description: Task guide — remove one resource (its table, incremental state, and checkpoints) or a whole source from a live destination with dlt-ops pipeline clean, verifying at each step that sibling sources and shared dlt system tables survive; covers the dry-run, the remote/local split, and the core-tier --local-only refusal.
+description: Task guide — remove one resource (its table and nested children, incremental state, and checkpoints) or a whole source from a live destination with dlt-ops pipeline clean, verifying at each step that sibling sources and shared dlt system tables survive; covers the dry-run, the remote/local split, and the core-tier --local-only refusal.
 ---
 
 # Clean up a resource or a source
@@ -23,9 +23,15 @@ This guide removes one resource from a live destination — its table, its incre
 
 ## Why clean exists and what it touches
 
-**Selective cleanup is the gap `pipeline clean` exists to fill:** removing one resource's data *and* its incremental state from a live destination has no supported path in dlt (dlt's own `pipeline.drop()` is whole-pipeline removal), and hand-deleting just the table leaves the incremental cursor behind, so the next run silently resumes from where the deleted data ended instead of re-extracting it.
+**dlt covers the destination half of this, and `clean` uses it.** `dlt pipeline <name> drop <resource>` drops the resource's tables and resets its incremental state as one load package, with resource regexes, `--drop-all`, `--state-only`, and `--state-paths`; `dlt -y pipeline <name> drop <resource>` runs it non-interactively (upstream marks the command experimental, and the Python entry point is `dlt.pipeline.helpers.pipeline_drop`). Reach for it directly when the destination is all you need to touch — and never hand-delete just the table, which leaves the incremental cursor behind, so the next run silently resumes from where the deleted data ended instead of re-extracting it.
 
-`clean` operates on both halves of a pipeline's footprint: **remote** (data tables in the destination, resource entries inside dlt's `_dlt_pipeline_state` blob, rows in the `_dlt_custom_checkpoints` table) and **local** (the pipeline working directory under `~/.dlt/pipelines/`, or `DLT_DATA_DIR`). By default it cleans both; `--local-only` / `--remote-only` narrow it. All remote surgery goes through the [`DestinationAdapter` boundary](../concepts/destinations-and-tiers.md), which makes remote cleanup a full-tier verb — step 6 shows what happens without an adapter.
+`pipeline clean` calls that same `pipeline_drop` for the destination-side work, so the drop is dlt's own transactional, append-only operation and dlt-ops neither decodes nor rewrites dlt state. Two things follow. Tables are whatever dlt says it would drop — **nested child tables included**, which a name-based guess would miss and leave orphaned. And the drop runs on a pipeline whose working dir is a throwaway temp dir synced from the destination, so `--remote-only` never mutates local state and a pending local load package can never block it.
+
+**`pipeline clean` exists for the rest of the footprint**, outside the scope of the drop itself: a `--dry-run` that prints the plan and changes nothing, the local pipeline working directory, the rows in dlt-ops' own `_dlt_custom_checkpoints` table that dlt has no knowledge of, the pipeline's leftover rows in dlt's shared system tables on a full clean, and a source-level unit — clean every resource of a source named the dlt-ops way, without enumerating them.
+
+`clean` operates on both halves of a pipeline's footprint: **remote** (data tables in the destination, dlt resource state, rows in the `_dlt_custom_checkpoints` table) and **local** (the pipeline working directory under `~/.dlt/pipelines/`, or `DLT_DATA_DIR`). By default it cleans both; `--local-only` / `--remote-only` narrow it. All the dlt-ops-owned remote SQL goes through the [`DestinationAdapter` boundary](../concepts/destinations-and-tiers.md), which makes remote cleanup a full-tier verb — step 6 shows what happens without an adapter.
+
+**`-r` takes exact resource names.** dlt reads a `re:`-prefixed selector as a regex; `clean` promises exact names, so a selector that is not a resource this source declares is refused before anything is touched, rather than forwarded and silently widened into a matching one.
 
 ## 1. Start state: two sources sharing one DuckDB file
 
@@ -103,6 +109,8 @@ dlt-ops pipeline clean -s github_events_api -r events --dry-run
 ```
 
 ```text
+Discovering sources
+
 Cleanup Plan:
 
   Source:    github_events_api
@@ -113,13 +121,15 @@ Cleanup Plan:
   Remote: github_events_raw
           - 1 data table(s): events
           - 1 resource state(s)
-          - state: surgical update (remove resource entries)
+          - state: reset the selected resources (dlt drop, append-only)
           - checkpoints for 1 resource(s)
 
 Dry-run mode: no changes will be made
 ```
 
-The plan names the three remote targets: the `events` data table (dropped), the resource's entry inside the pipeline state blob (surgically removed — the state is decoded, the one resource entry deleted, and the result re-encoded and appended as a new state version), and its checkpoint rows. Locally, a selective clean edits `state.json` and deletes the schema file but keeps the working directory, because the source's other resources still live there. Table identification uses a three-tier fallback — local schema file, then the destination's `_dlt_version` table, then source introspection — so `clean` works even on a machine that never ran the pipeline.
+The plan names the three remote targets: the `events` data table (dropped), the resource's dlt state (reset by dlt's drop, which appends a new state version rather than editing the old one in place), and its checkpoint rows. Locally, a selective clean edits `state.json` and deletes the schema file but keeps the working directory, because the source's other resources still live there.
+
+The remote half of that plan is dlt's own dry run: `pipeline_drop` is constructed and its `.info` read, never called. So the table list is what dlt would actually drop — nested child tables and all — rather than a guess from the naming convention. Building it syncs the schema from the destination first, which is also why `clean` works on a machine that never ran the pipeline.
 
 ## 3. Clean the resource and verify
 
@@ -132,17 +142,16 @@ dlt-ops pipeline clean -s github_events_api -r events --auto-approve
 ```text
 Cleaning...
 
-10:25:16|dlt_ops.discovery.cleanup|Dropped table: github_events_raw.events
-10:25:16|dlt_ops.discovery.cleanup|Removed resource state: github_events_api.events
-10:25:16|dlt_ops.discovery.cleanup|Updated pipeline state in destination
+10:25:16|dlt_ops.discovery.cleanup|dlt drop complete for schema 'github_events_api'
 10:25:16|dlt_ops.discovery.cleanup|Deleted checkpoints for resource: events
 10:25:16|dlt_ops.discovery.cleanup|Updated local state.json
+10:25:16|dlt_ops.discovery.cleanup|Deleted local schema: ~/.dlt/pipelines/github_events_api_pipeline/schemas/github_events_api.schema.json
 Local:
   - state.json (resource entries removed)
   - schema (deleted github_events_api.schema.json)
 Remote:
   - table: events
-  - state: updated (removed 1 resource(s))
+  - state: reset events
   - checkpoint: events
 
 Cleanup complete
@@ -205,7 +214,7 @@ Cleanup Plan:
 
   Local:  ~/.dlt/pipelines/github_events_api_pipeline
   Remote: github_events_raw
-          - 2 data table(s): events, actors
+          - 2 data table(s): actors, events
           - 2 resource state(s)
           - system tables: DELETE rows from _dlt_pipeline_state, _dlt_loads, _dlt_version
           - checkpoints for 2 resource(s)
@@ -220,8 +229,7 @@ dlt-ops pipeline clean -s github_events_api --auto-approve
 ```text
 Cleaning...
 
-10:26:17|dlt_ops.discovery.cleanup|Dropped table: github_events_raw.events
-10:26:17|dlt_ops.discovery.cleanup|Dropped table: github_events_raw.actors
+10:26:17|dlt_ops.discovery.cleanup|dlt drop complete for schema 'github_events_api'
 10:26:17|dlt_ops.discovery.cleanup|Deleted _dlt_pipeline_state rows where pipeline_name = github_events_api_pipeline
 10:26:17|dlt_ops.discovery.cleanup|Deleted _dlt_version rows where schema_name = github_events_api
 10:26:17|dlt_ops.discovery.cleanup|Deleted _dlt_loads rows where schema_name = github_events_api
@@ -230,8 +238,8 @@ Cleaning...
 Local:
   - ~/.dlt/pipelines/github_events_api_pipeline
 Remote:
-  - table: events
   - table: actors
+  - table: events
   - state: _dlt_pipeline_state (rows deleted)
   - state: _dlt_version (rows deleted)
   - state: _dlt_loads (rows deleted)
@@ -239,6 +247,8 @@ Remote:
 
 Cleanup complete
 ```
+
+dlt's drop reports the tables that physically held data; the four `state:` lines are the dlt-ops half, deleting this pipeline's rows from the shared bookkeeping tables that dlt's append-only drop leaves in place. Without that half a "cleaned" source would still appear in the dataset's load history.
 
 ## 5. Verify: rows deleted, tables kept
 
@@ -296,7 +306,7 @@ dlt-ops pipeline clean -s demo_events --auto-approve
 Error: destination 'filesystem' has no DestinationAdapter — remote cleanup needs one (core mode). Clean local state with --local-only, or register an adapter; see docs/reference/destinations.md.
 ```
 
-The command exits 1 and nothing is deleted, on either side. The local half needs no adapter — `--local-only` works at any tier:
+The command exits 1 and nothing is deleted, on either side. `--dry-run` refuses identically — the plan's remote half is built by opening the destination, so there is no plan to draw, and printing a partial one you could approve would be worse than the refusal. The local half needs no adapter — `--local-only` works at any tier:
 
 ```bash
 dlt-ops pipeline clean -s demo_events --local-only --auto-approve
@@ -322,8 +332,8 @@ Cleanup complete
 
 The bucket's files are untouched — on core tier, removing destination-side data is your storage tooling's job; `clean` refuses to half-do it.
 
-!!! warning "The dlt-version guard"
-    Remote cleanup rewrites dlt-internal state tables whose layout is reverse-engineered and re-verified per dlt minor. On a dlt minor outside the verified set ([compatibility](../reference/compatibility.md); currently 1.27.x–1.29.x) it raises `CleanupUnsupportedError` and refuses to guess against an unverified layout — the one feature in the package that gates on the verified matrix. `clean --local-only` and every other verb keep working; dlt's own `pipeline.drop()` remains the whole-pipeline escape hatch on any version.
+!!! note "Any dlt version at or above the floor"
+    `clean` gates on nothing but the adapter. The destination-side drop is dlt's own `pipeline_drop`, and the shared bookkeeping rows dlt-ops deletes afterwards are addressed by table and column names read off the live schema, so they follow whatever naming convention that destination uses rather than a hardcoded guess. The one file cleanup still edits by hand — the local `state.json` — checks the state engine version dlt stamped into it and refuses an unfamiliar layout before any destructive step runs. See [compatibility](../reference/compatibility.md).
 
 ## The first run after a selective clean
 
@@ -333,4 +343,4 @@ The bucket's files are untouched — on core tier, removing destination-side dat
 
 - [Destinations and tiers](../concepts/destinations-and-tiers.md) — why remote `clean` is a full-tier verb, and what core tier keeps
 - [Runs ledger](../concepts/runs-ledger.md) — the operational record `clean` deliberately leaves alone
-- [Compatibility](../reference/compatibility.md) — the verified dlt matrix behind the version guard
+- [Compatibility](../reference/compatibility.md) — the verified dlt matrix, and why it gates nothing at runtime

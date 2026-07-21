@@ -22,9 +22,9 @@ description: How dlt-ops is tested — the credential-free default lane every PR
 uv run --no-sync pytest
 ```
 
-The end-to-end example-project suite (`tests/test_e2e_example.py`) actively fails on any socket connect, so an accidental network dependency is caught rather than tolerated. This is the bulk of the suite — 951 of 998 tests at the time of writing.
+The end-to-end example-project suite (`tests/test_e2e_example.py`) actively fails on any socket connect, so an accidental network dependency is caught rather than tolerated. This is the bulk of the suite — 1094 of 1149 tests at the time of writing.
 
-The other 47 carry the `integration` marker and self-skip here: each integration test is gated on its backing being present (psycopg2 for Postgres, credentials for BigQuery, the `[airflow]` extra for the Airflow adapter) and skips cleanly when it is absent, so the default lane stays credential-free even though the marked tests are collected.
+The other 55 carry the `integration` marker and self-skip here: each integration test is gated on its backing being present (psycopg2 for Postgres, credentials for BigQuery, the `[airflow]` extra for the Airflow adapter) and skips cleanly when it is absent, so the default lane stays credential-free even though the marked tests are collected.
 
 ## The integration marker and the cross-system triangle
 
@@ -84,30 +84,31 @@ POSTGRES_URL=postgresql://user:pass@localhost:5432/db uv run --no-sync pytest -m
 Notes worth knowing:
 
 - Each `test` matrix cell syncs the locked env, then `uv pip install "dlt~=X.Y.0"` for its matrix dlt minor, then `uv run --no-sync pytest` — the `--no-sync` is what keeps that hand-installed dlt from being reverted. In this lane the two Postgres legs of the triangle self-skip (no psycopg2), but the core-tier `TestDuckDBToFilesystem` leg and the E2E example suite run in every one of the 9 cells; the `integration` job is where the Postgres legs actually execute against live Postgres.
-- `test-dlt-latest` is an early-warning lane: the dlt dependency is floor-only, so PyPI can run ahead of the verified matrix. A red run here means the next dlt minor needs the state-schema diff and matrix extension (below) before it is trusted — it does not block your PR.
+- `test-dlt-latest` is an early-warning lane: the dlt dependency is floor-only, so PyPI can run ahead of the verified matrix, and users are already on those releases. A red run here is the signal that a new dlt minor needs attention before it joins the matrix (below) — it does not block your PR.
 - `test-windows` is required: the package does filesystem discovery and writes text files, so path semantics and the locale-default encoding (cp1252, not UTF-8) are its risk profile.
 - `integration-bigquery` skips cleanly when the `BQ_SERVICE_ACCOUNT_JSON` secret is absent (forks have none), so it never fails a fork PR.
 - Python 3.14 is deliberately out of the matrix: the floor dlt minor (1.27) stops declaring support at 3.13 while newer minors declare 3.14, so 3.14 joins when the floor moves.
 
 ## The dlt verified matrix
 
-**The package supports a set of dlt minors, verified in CI, with one single source of truth: `ci/dlt-versions.txt` (one `X.Y` per line — currently 1.27, 1.28, 1.29).** Everything derives from that file:
+**The package tests a set of dlt minors in CI, with one single source of truth: `ci/dlt-versions.txt` (one `X.Y` per line — currently 1.27, 1.28, 1.29).** Three things derive from that file:
 
 - the `test` matrix (a `dlt-versions` job reads the file into the matrix's dlt axis),
 - the `pyproject.toml` dlt floor (the oldest listed minor),
-- `SUPPORTED_DLT_MINORS` in `dlt_ops/_compat.py` (the guard that makes remote `clean` refuse on an unverified minor),
 - the matrix table in `COMPATIBILITY.md`.
 
-`tests/test_packaging.py` and `tests/test_cleanup.py` fail if any of these drift out of sync.
+`tests/test_packaging.py` fails if any of those drift out of sync.
+
+**The file is a CI fact, never a runtime gate.** No package module may gate a feature on an allowlist of dlt minors, and `tests/test_packaging.py` enforces that too — it scans `dlt_ops/` and fails on any module mentioning one. A hardcoded set of minors in package code is what would make a fresh install lose a feature the day dlt ships a version this repo has not seen; every verb runs on any dlt at or above the floor.
 
 ### Adding a dlt minor
 
 **Add a dlt minor once it releases and `test-dlt-latest` is green on it:**
 
-1. Run `ci/dump_state_schema.py` per destination on the new minor and diff against the committed dumps in `ci/state-schema-dumps/`. The script runs a test pipeline twice, then dumps the `information_schema` columns, row semantics, and state/schema codec of dlt's three internal state tables (`_dlt_loads`, `_dlt_pipeline_state`, `_dlt_version`) as stable-ordered JSON that diffs mechanically. It runs on a bare `dlt[...]` venv — it deliberately copies dlt-ops's state codec rather than importing package internals — the way its module docstring shows.
-2. On an empty diff, extend `ci/dlt-versions.txt`, `SUPPORTED_DLT_MINORS`, and the `COMPATIBILITY.md` matrix together in one change; raise the `pyproject.toml` floor only when you drop an old minor.
+1. Let the non-blocking `test-dlt-latest` lane run the full suite against it and go green.
+2. Extend `ci/dlt-versions.txt` and the `COMPATIBILITY.md` matrix together in one change; raise the `pyproject.toml` floor only when you drop an old minor. `tests/test_packaging.py` enforces that the two stay in sync.
 
-**Why the state-schema diff gates it:** remote `clean` rewrites dlt's internal state tables, whose layout dlt-ops reverse-engineers per minor. An empty diff is the evidence that the reverse-engineering still holds on the new minor. The full policy and the verified-by legend are in [compatibility](../reference/compatibility.md).
+**Adding a minor changes what CI covers, and nothing else.** There is no gate to lift: every verb already runs on any dlt at or above the floor, and `tests/test_packaging.py` fails if a package module so much as names a set of dlt minors. Remote `clean` used to be the exception worth a per-minor probe, because it wrote dlt's internal state tables itself; it now hands the destination-side drop to dlt's own `pipeline_drop` and addresses the remaining shared-table rows by names read off the live schema, so there is no reverse-engineered layout left to re-confirm per release. The full policy and the verified-by legend are in [compatibility](../reference/compatibility.md).
 
 ## Where next
 

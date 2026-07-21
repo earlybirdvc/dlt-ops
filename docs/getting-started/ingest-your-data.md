@@ -4,12 +4,12 @@ description: The front door for ingesting data with dlt-ops — dlt provides the
 
 # Ingest your data
 
-You came here to move data from a REST API, a database, or a bucket into your warehouse or lake, and you want to know where `dlt-ops` fits. Here is the honest frame: `dlt-ops` ships no connectors and moves zero rows itself — dlt provides the source, and `dlt-ops` wraps it in a project layout plus the operational verbs (`validate`, `run`, `status`, `backfill`) that make an ingestion production-shaped. This page is the router: pick the dlt helper for your source, pick a destination and learn its capability tier, then wire one source end to end.
+You came here to move data from a REST API, a database, or a bucket into your warehouse or lake, and you want to know where `dlt-ops` fits. Here is the honest frame: `dlt-ops` ships no connectors and owns no part of the ingest write path — dlt provides the source and performs the write, and `dlt-ops` wraps it in a project layout plus the operational verbs (`validate`, `run`, `status`, `backfill`) that make an ingestion production-shaped. This page is the router: pick the dlt helper for your source, pick a destination and learn its capability tier, then wire one source end to end.
 
 **At a glance**
 
 - **What `dlt-ops` gives you** — the project layout, discovery, and the operational verbs: `validate`, `run`, `status`, `backfill`.
-- **What you bring** — the source itself: a dlt helper (`rest_api`, `sql_database`, `filesystem`) or a `@dlt.resource` you write. `dlt-ops` ships zero connectors and moves zero rows; dlt owns the write.
+- **What you bring** — the source itself: a dlt helper (`rest_api`, `sql_database`, `filesystem`) or a `@dlt.resource` you write. `dlt-ops` ships zero connectors; dlt owns the ingest write path. The one place `dlt-ops` writes your rows itself is [quarantine](../concepts/assertions.md) — rows an assertion rejects are diverted out of the load into a `_dlt_rejected` table.
 - **Your first decision** — [which dlt source helper matches yours](#choose-your-source).
 - **Your second decision** — [which destination, and its capability tier](#choose-your-destination).
 
@@ -33,7 +33,7 @@ Every helper above is a dlt feature — its pagination, its auth, and its increm
 | Tier | Destinations | What runs there |
 |---|---|---|
 | **Full** | `duckdb`, `postgres`, `bigquery` | the core loop, plus the six adapter-gated features: the runs ledger and `status`, checkpoints, backfill, remote `clean`, reconcile, and assertion quarantine |
-| **Core** | `snowflake`, `databricks`, `s3`, `gcs`, `azure`, `filesystem` — any destination dlt can resolve | the core loop only: discovery, `validate`, `run` with `fail`/`warn` assertions, schema contracts, scheduling metadata, and trace persistence; the six adapter-gated features refuse loudly |
+| **Core** | `snowflake`, `databricks`, `filesystem` (the one object-store destination — S3, GCS, and Azure Blob are `bucket_url` schemes on it, not destination names) — and any other destination dlt can resolve | the core loop only: discovery, `validate`, `run` with `fail`/`warn` assertions, schema contracts, scheduling metadata, and trace persistence; the six adapter-gated features degrade or refuse, loudly either way |
 
 **Read the second row before you commit to Snowflake, Databricks, or an object store.** `run` and its `fail`/`warn` assertions work on every destination, but core tier has no SQL engine for the [six adapter-gated features](../reference/destinations.md) to live in: observability (the runs ledger, `status`) skips with an INFO line, and a feature your config demands — a checkpoint, a backfill, an assertion `quarantine` — is refused at preflight rather than silently downgraded. Object stores are core tier permanently; Snowflake and Databricks stay core tier until someone registers a `DestinationAdapter` for them.
 
@@ -64,6 +64,8 @@ import pydantic
 
 
 class Product(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid")
+
     id: int
     name: str
     price_cents: int

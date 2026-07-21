@@ -35,8 +35,9 @@ VALIDATORS_AXIS = "validators"
 class RuleProviderFailure:
     """A rule provider that could not be loaded or enumerated (soft-fail record).
 
-    Its rules are unavailable this run — surfaced by ``validate
-    --show-resolved-rules`` (and the load failure itself by ``plugins doctor``).
+    Its rules are unavailable this run — surfaced by every ``validate`` run
+    via :func:`rule_provider_errors`, listed by ``validate
+    --show-resolved-rules``, and the load failure itself by ``plugins doctor``.
     """
 
     provider: str
@@ -86,6 +87,32 @@ def load_rule_specs() -> RuleAssembly:
             claimed[spec.rule_id] = provider_name
             specs.append(spec)
     return RuleAssembly(specs=tuple(specs), failures=tuple(failures))
+
+
+def rule_provider_errors(assembly: RuleAssembly) -> list[ValidationError]:
+    """Providers whose rules did not make it into this run — hard errors.
+
+    A provider that raised contributes zero rules, so ``validate`` would
+    otherwise check less than it claims and still report success. These are
+    errors rather than warnings for two reasons: a warning is filtered out of
+    every non-``--strict`` run, which is precisely the run that must not
+    claim success; and the Tier-2 runtime preflight already hard-fails on a
+    plugin that soft-failed at load, so a passing Tier 1 followed by a
+    refused ``run`` would be the worse contradiction.
+
+    The provider a project cannot lose is ``core`` — it owns the baseline
+    rule set — but a broken third-party provider is a real defect too (an
+    optional dependency that is merely absent returns no rules and does not
+    land here), so severity does not split on the owner.
+    """
+    return [
+        ValidationError(
+            source_name="dlt_ops.validators",
+            field=f"validators.{failure.provider}",
+            message=f"rules unavailable this run: {failure.error}",
+        )
+        for failure in assembly.failures
+    ]
 
 
 def check_unknown_rule_ids(configured: Iterable[str], known_ids: Iterable[str]) -> tuple[str, ...]:
@@ -220,7 +247,8 @@ def validate_sources(
 ) -> list[ValidationError]:
     """Run the resolved rule set against discovered sources.
 
-    Discovery runs both phases: Phase 1 (AST) lists everything, Phase 2
+    Discovery runs both phases: Phase 1 (AST) lists everything — including a
+    placeholder per source module that does not parse — and Phase 2
     (sandboxed import) attaches callables and records import failures /
     Rule 15 findings. Validators that instantiate sources see only the
     import-OK subset (``ctx.sources``); the import-health validators see the
@@ -230,9 +258,12 @@ def validate_sources(
     overlaid by ``[dlt_ops.rules]`` decide which rules execute, and
     ``rule_exemptions`` findings are filtered per (source, rule) pair.
     Config problems — unknown rule IDs, non-bool knob values, unjustified
-    exemptions — surface as errors in the returned list. Import-error
-    surfacing (a module that cannot import cannot run) is infrastructure,
-    not a rule: always on, no knob.
+    exemptions — surface as errors in the returned list, as do rule
+    providers that contributed no rules (:func:`rule_provider_errors`): a run
+    that quietly checks less than it claims must not report success.
+    Import-error surfacing (a module that cannot import cannot run — it fails
+    to parse, raises, or is withheld for violating Rule 15) is
+    infrastructure, not a rule: always on, no knob.
 
     Args:
         project_root: Path to the project root
@@ -244,7 +275,7 @@ def validate_sources(
     Returns:
         List of ValidationError objects
     """
-    introspected = introspect(project_root, discover(project_root))
+    introspected = introspect(project_root, discover(project_root, include_unloadable=True))
     sources = {name: info for name, info in introspected.items() if info.is_introspected}
     config = load_raw_config(project_root)
 
@@ -260,7 +291,8 @@ def validate_sources(
 
     assembly = load_rule_specs()
     project_config = _load_project_config(project_root)
-    errors = rules_config_errors(project_config, assembly.known_ids)
+    errors = rule_provider_errors(assembly)
+    errors.extend(rules_config_errors(project_config, assembly.known_ids))
     exemptions, exemption_errors = load_rule_exemptions(config, assembly.known_ids)
     errors.extend(exemption_errors)
     resolved = resolve_rules(project_config, assembly)

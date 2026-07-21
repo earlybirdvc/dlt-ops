@@ -876,6 +876,8 @@ class TestValidateRules:
 
     def _typed_source(self, name: str = "web_events"):
         class Row(pydantic.BaseModel):
+            model_config = pydantic.ConfigDict(extra="forbid")
+
             id: int
             path: str
 

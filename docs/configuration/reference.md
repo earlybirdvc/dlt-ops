@@ -4,7 +4,7 @@ description: Every .dlt/config.toml key dlt-ops reads — the [dlt_ops] project 
 
 # Config reference
 
-Every key `dlt-ops` reads from `.dlt/config.toml`, with its type, default, and the parser that consumes it. All configuration lives in the same file dlt itself reads — there are no environment-variable overrides and no decorator-level config, TOML is canonical. For the model behind these keys (namespaces, precedence, secrets split) see the [configuration overview](index.md); for the rule IDs the `[dlt_ops.rules]` and `rule_exemptions` tables key on, see the [rules reference](rules.md).
+Every key `dlt-ops` reads from `.dlt/config.toml`, with its type, default, and the parser that consumes it. All of it lives in the same file dlt itself reads, and every key below is parsed straight out of that file — no environment-variable override, no decorator-level config. The scope is the `dlt_ops` namespace only: dlt's own keys keep dlt's provider chain, environment variables included. For the model behind these keys (namespaces, precedence, secrets split) see the [configuration overview](index.md); for the rule IDs the `[dlt_ops.rules]` and `rule_exemptions` tables key on, see the [rules reference](rules.md).
 
 The top-level `[dlt_ops]` table doubles as the **project marker**: a directory is a `dlt-ops` project iff `.dlt/config.toml` exists, parses, and contains a `[dlt_ops]` table. Two namespaces carry `dlt-ops` config; everything else in the file is dlt's own territory.
 
@@ -22,7 +22,7 @@ The top-level `[dlt_ops]` table doubles as the **project marker**: a directory i
 | `require_destination_adapter` | boolean | `false` | When `true`, a resolved destination with no registered `DestinationAdapter` is a hard failure instead of core-mode degradation: every `run` / `backfill` fails its Tier-2 preflight and the `destination_capability` rule reports an error. Default `false` — the core run loop works on any destination dlt can resolve (core tier); only the adapter-gated features are unavailable there — the six named in the [destinations reference](../reference/destinations.md). Only the literal `true` engages it; any other value reads as `false`. |
 | `load_timestamp_column` | string | unset (feature off) | Name of a per-run load-timestamp column; also the time axis for removal-drift detection (`pipeline reconcile --include-removal`). Read from the raw table by the runner, the reconciler, and the `cursor_not_load_timestamp` rule. See the warning below before setting it. |
 | `injected_columns` | array of strings | `[]` | Column names your own code stamps on every row of **every** source (infrastructure keys that are not part of any upstream payload). The schema-drift reconciler ignores them instead of reporting them as drift. Merged (union) with each source's own `injected_columns` and the `load_timestamp_column`. Non-string entries are dropped. |
-| `staleness_days` | positive integer | `7` | Threshold for the `stale_sources` rule: a source **with run history** whose last run started more than this many days ago gets a validation warning. Non-integer or non-positive values fall back to the default. |
+| `staleness_days` | positive integer | `7` | Threshold for the `stale_sources` rule: a source **with run history** whose last run started more than this many days ago gets a validation warning, rendered by `validate --strict` only. Non-integer or non-positive values fall back to the default. |
 | `alert_sinks` | array of strings | unset → `["logging"]` | Alert-sink plugin names the reconciler emits events through. Unset means the built-in `logging` sink. **Unset vs. explicit matters**: `validate` and the runtime preflight only enforce names you explicitly configured. An explicitly empty list (`alert_sinks = []`) disables emission on purpose. |
 
 Every key above is parsed today — three of them (`load_timestamp_column`, `injected_columns`, `staleness_days`) are read directly from the raw table rather than through a typed accessor, but all have live consumers. Any top-level key not in this table (and not one of the sub-tables below) is collected as an unknown key.
@@ -32,7 +32,7 @@ Every key above is parsed today — three of them (`load_timestamp_column`, `inj
 
 ### `[dlt_ops.rules]`
 
-**Per-rule on/off knob for the validation framework.** A missing entry means the rule's registered default (on for every shipped rule); values must be `true` or `false` (anything else is a `validate` error); an unknown rule ID is an error in **both** tiers (`validate` fails, and every `run` / `backfill` fails its runtime preflight — the typo guard). Rule IDs are stable within a major version; the full catalog is in the [rules reference](rules.md).
+**Per-rule on/off knob for the validation framework.** A missing entry means the rule's registered default — on for every shipped rule except `incremental_cursor_required`, which ships off and is adopted with `= true`. Values must be `true` or `false` (anything else is a `validate` error); an unknown rule ID is an error in **both** tiers (`validate` fails, and every `run` / `backfill` fails its runtime preflight — the typo guard). Rule IDs are stable within a major version; the full catalog is in the [rules reference](rules.md).
 
 ```toml
 [dlt_ops.rules]
@@ -131,7 +131,7 @@ Unresolved = hard error, same rule.
 
 For **rules** (lowest to highest):
 
-1. The rule's registered default (on for all shipped rules)
+1. The rule's registered default (on for all shipped rules except `incremental_cursor_required`)
 2. `[dlt_ops.rules]` project-wide override
 3. `[sources.<X>.dlt_ops.rule_exemptions]` per-source suppression (findings filtered, rule still runs)
 

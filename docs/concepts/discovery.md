@@ -12,11 +12,13 @@ There is no registration code in this model: a source exists because a correctly
 
 | What it is | When your code runs | Phase 1 | Phase 2 | Failure mode |
 |---|---|---|---|---|
-| A two-phase scan of the mandatory layout — no registration code | Never at enumeration; only at `validate`/`run` (Phase 2), and only after the sandbox verdict | Pure `ast` parse, never imports — powers `list`, `resources`, `status`, and Airflow DAG parsing | A throwaway-subprocess import-safety check, then an in-process import gated on its verdict | Per-module isolation — a module that fails to parse or import is skipped/excluded with the error recorded; siblings are unaffected |
+| A two-phase scan of the mandatory layout — no registration code | Never at enumeration; only at `validate`/`run` (Phase 2), and only after the sandbox verdict | Pure `ast` parse, never imports — powers `list`, `resources`, `status`, and Airflow DAG parsing | A throwaway-subprocess import-safety check, then an in-process import gated on its verdict | Per-module isolation — a module that fails to parse or import is excluded with the error recorded and surfaced by `validate`; siblings are unaffected |
 
 ## Phase 1 — the pure AST scan
 
-**Phase 1 parses candidate modules with Python's `ast` module and never imports them.** A directory directly under the project root qualifies as a pipeline when it contains a `source/` subdirectory with at least one non-underscore `.py` file; dot- and underscore-prefixed directories are skipped, as are `__pycache__`, `logs`, `.dlt`, and `common`. Every `source/*.py` module in a qualifying pipeline is scanned for top-level functions decorated `@dlt.source`.
+**Phase 1 parses candidate modules with Python's `ast` module and never imports them.** Two things, and only these two, decide whether a directory directly under the project root is a pipeline: its name must not start with `.` or `_`, and it must hold a `source/` subdirectory containing at least one non-underscore `.py` file. **No directory is excluded by name** — a pipeline directory called `common` or `logs` is as discoverable as any other. (`.dlt` and `__pycache__` need no special case; the prefix rule already covers them.) Every `source/*.py` module in a qualifying pipeline is then scanned for top-level functions decorated `@dlt.source`.
+
+Every directory Phase 1 rejects is logged at DEBUG with the reason it was rejected — no `source/`, a `source/` holding only underscore-prefixed files, a leading `.` or `_`. A directory an operator believes is a pipeline and that is silently missing from `pipeline list` is the hardest discovery failure to diagnose, and this is the only place that knows why, so raise the log level before guessing.
 
 Each discovered source is keyed by its config section: the explicit `@dlt.source(name="<X>")` value, or the function name minus its `_source` suffix as the fallback (`validate` requires the explicit form — the `explicit_source_name` rule). Alongside the source function, the scan collects statically:
 
@@ -84,7 +86,9 @@ The audit hook flags four kinds of import-time behavior:
 
 Known gaps, stated plainly: C extensions doing raw syscalls bypass CPython audit events, `os.write` on an inherited file descriptor has no event, and whatever a spawned subprocess does is invisible — only the spawn is flagged.
 
-Be clear about what the sandbox does and does not block: a module that violates import safety but imports cleanly **is** still imported in-process afterward — its side effects run on the machine executing `validate` or `run`. The sandbox produces *findings* for the `import_safety` rule; enforcement is `validate` failing your CI, not a runtime cage. Disabling the rule (`[dlt_ops.rules] import_safety = false`) skips the subprocess entirely; the in-process import and its per-module error isolation remain.
+Be clear about what the sandbox does and does not block. The audit hook **observes**; it does not prevent. The child process really does execute the module's import, side effects and all — that is how the findings are produced — so a module that phones home at import time phones home once, from a process built to be thrown away. What the sandbox buys is that it happens exactly there: a module with violations is then **withheld from the in-process import**, so those side effects do not run again in the parent. `validate` reports the violation as an error, and `run` and `backfill` refuse the source rather than importing it.
+
+The project-wide `[dlt_ops.rules] import_safety = false` knob turns the whole mechanism off: no subprocess, and the module is imported in-process as it would have been otherwise. That is the supported way to run a source whose import-time I/O you have accepted.
 
 ## Why: the orchestrator-parse foot-gun
 
@@ -106,28 +110,36 @@ dlt-ops pipeline validate
 ```
 
 ```text
-✗ 3 error(s):
-  [demo_events] import_safety: Rule 15: network at import of demo_events.py — socket.bind(<socket.socket fd=4, family=30, type=1, proto=0, laddr=('::', 0, 0, 0)>, ('::1', 0))
+Validating sources
+Source 'demo_events' excluded from Phase 2: not imported — violates import safety (Rule 15) at import time: network (socket.getaddrinfo: 127.0.0.1:9), network (socket.connect: ('127.0.0.1', 9)). Fix the module or opt out via [dlt_ops.rules] import_safety = false.
+
+✗ 4 error(s):
+  [demo_events] import: source module demo_events.py: not imported — violates import safety (Rule 15) at import time: network (socket.getaddrinfo: 127.0.0.1:9), network (socket.connect: ('127.0.0.1', 9)). Fix the module or opt out via [dlt_ops.rules] import_safety = false.
+  [demo_events] validation_coverage: reduced rule coverage: source 'demo_events' failed Phase-2 introspection, so it is absent from the introspected source set every source-inspecting rule iterates — those rules did not run for it. Its config, schema, resource and assertion findings are unknown, not clean. Fix the 'import' finding reported for this source to restore full coverage.
   [demo_events] import_safety: Rule 15: network at import of demo_events.py — socket.getaddrinfo(127.0.0.1:9)
   [demo_events] import_safety: Rule 15: network at import of demo_events.py — socket.connect(('127.0.0.1', 9))
 ```
 
 (The `Rule 15` prefix is the convention's historical number; the rule ID that knobs and exemptions key on is `import_safety`.) The fix is always the same shape: move the side effect inside the source or resource function, where it runs when the pipeline runs — not when the file is parsed or imported.
 
+Note what the audit hook does *not* report here. The `import requests` line is a library initialising itself, and one of the things urllib3 does during its own import is bind an IPv6 socket. Attribution walks out from each event to the first module body on the stack, so that bind is attributed to urllib3 and never appears as a finding against `demo_events.py` — only the two calls the project's own module body made do. The `validation_coverage` line is an always-on finding of its own: a source excluded from Phase 2 is invisible to every rule that iterates sources, so `validate` states the coverage that exclusion cost rather than letting "no findings" read the same as "never checked".
+
 ## Failure behavior
 
 **Discovery isolates failures per module, and Phase 1 keeps listing what Phase 2 cannot load:**
 
 - **Broken `.dlt/config.toml`** — a loud parse error. A broken project marker never silently widens the root search or degrades to defaults.
-- **A module that fails to parse** — skipped with a warning; sibling modules are unaffected.
-- **A module that raises at import** — excluded from Phase 2 with the error recorded. `pipeline list` still shows it (the AST scan needs no import), and `validate` reports it as an always-on error with no rule ID — a source that cannot import cannot run, so there is no knob to silence it. With a module-level `os.environ["DEMO_EVENTS_API_KEY"]` and the variable unset:
+- **A module that fails to parse** — excluded from discovery so sibling modules are unaffected, and reported by `validate` as an error that exits non-zero. It is not quietly dropped: a source file nobody can parse is a source that cannot run.
+- **A module that raises at import** — excluded from Phase 2 with the error recorded. `pipeline list` still shows it (the AST scan needs no import), and `validate` reports it as an always-on error with no rule ID — a source that cannot import cannot run, so there is no knob to silence it. A second always-on error follows it, naming what the exclusion cost: every rule that iterates sources skipped this one, so its config, schema and assertion findings are unknown rather than clean. With a module-level `os.environ["DEMO_EVENTS_API_KEY"]` and the variable unset:
 
     ```text
     $ dlt-ops pipeline validate
+    Validating sources
     Source 'demo_events' excluded from Phase 2: module raised at import: KeyError: 'DEMO_EVENTS_API_KEY'
 
-    ✗ 1 error(s):
+    ✗ 2 error(s):
       [demo_events] import: source module demo_events.py: module raised at import: KeyError: 'DEMO_EVENTS_API_KEY'
+      [demo_events] validation_coverage: reduced rule coverage: source 'demo_events' failed Phase-2 introspection, so it is absent from the introspected source set every source-inspecting rule iterates — those rules did not run for it. Its config, schema, resource and assertion findings are unknown, not clean. Fix the 'import' finding reported for this source to restore full coverage.
     ```
 
 - **A sandbox child that crashes or times out** — the module counts as unverified and is not imported; the error is recorded and surfaced the same way.

@@ -1,19 +1,60 @@
 """Tests for checkpoint management framework."""
 
 import datetime as dt
+import logging
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import dlt
 import pytest
 from dlt.common.pendulum import pendulum
 
-from dlt_ops import with_checkpoints
+from dlt_ops import cleanup_checkpoints, list_checkpoints, with_checkpoints
 from dlt_ops.checkpoints import DEFAULT_CHECKPOINT_TABLE, decorator
-from dlt_ops.checkpoints.manager import CheckpointManager, checkpoint_table_ddl
+from dlt_ops.checkpoints.manager import CheckpointManager, CheckpointStateError, checkpoint_table_ddl
 from dlt_ops.destinations import UnregisteredDestinationError
 from dlt_ops.destinations.bigquery import BigQueryAdapter
 from dlt_ops.destinations.duckdb import DuckDBAdapter
+
+CKPT_PIPELINE = "ckpt_pipeline"
+CKPT_DATASET = "analytics"
+
+
+@pytest.fixture
+def duckdb_pipeline(tmp_path, monkeypatch):
+    """A real DuckDB-backed pipeline installed as the current dlt pipeline.
+
+    CheckpointManager resolves adapter, dataset and client from
+    ``dlt.current.pipeline()``, so this runs the checkpoint path end-to-end
+    against a real destination file instead of a mock.
+    """
+    monkeypatch.setenv("DLT_DATA_DIR", str(tmp_path / "dlt-data"))
+    monkeypatch.chdir(tmp_path)
+    pipeline = dlt.pipeline(
+        pipeline_name=CKPT_PIPELINE,
+        destination="duckdb",
+        dataset_name=CKPT_DATASET,
+        pipelines_dir=str(tmp_path / "pipelines"),
+    )
+    monkeypatch.setattr(dlt.current, "pipeline", lambda: pipeline)
+    return pipeline
+
+
+def _fail_sql_matching(monkeypatch, method: str, fragment: str) -> None:
+    """Make the adapter call `method` raise for canonical SQL containing `fragment`.
+
+    Simulates one statement hitting a transient destination failure (outage,
+    rate limit) while the rest of the checkpoint path stays real.
+    """
+    real = getattr(DuckDBAdapter, method)
+
+    def patched(self: Any, client: Any, canonical_sql: str, *params: Any) -> Any:
+        if fragment in canonical_sql:
+            raise RuntimeError("destination unavailable")
+        return real(self, client, canonical_sql, *params)
+
+    monkeypatch.setattr(DuckDBAdapter, method, patched)
 
 
 class TestValueSerialization:
@@ -314,6 +355,77 @@ class TestCheckpointDDL:
         ]
 
 
+class TestResumeStateFailures:
+    """Resume state is a gate, not observability — it fails loudly, never quietly.
+
+    The regression these guard: an unreadable checkpoint used to be downgraded
+    to "no checkpoint", which restarts the resource at the window start and
+    silently duplicates every already-loaded row on an append-only destination.
+    """
+
+    def test_unreadable_checkpoint_fails_the_run_instead_of_starting_fresh(self, duckdb_pipeline, monkeypatch):
+        _fail_sql_matching(monkeypatch, "execute_query", "SELECT checkpoint_value")
+
+        with pytest.raises(CheckpointStateError, match="resume state"):
+            CheckpointManager(CKPT_PIPELINE, "events", frequency=1).__enter__()
+
+    def test_failed_completion_write_fails_the_run(self, duckdb_pipeline, monkeypatch):
+        """Checkpoints left 'active' by a finished run are resume state too: the
+        NEXT run would resume from this one's checkpoint instead of its bounds."""
+        _fail_sql_matching(monkeypatch, "execute_sql", "SET status = 'completed'")
+
+        with pytest.raises(CheckpointStateError, match="mark checkpoints completed"):
+            with CheckpointManager(CKPT_PIPELINE, "events", frequency=1) as mgr:
+                mgr.save_checkpoint("cursor-1", [{"id": 1}])
+
+    def test_failed_run_keeps_its_checkpoints_active(self, duckdb_pipeline):
+        """The mirror image: a run that raised must NOT mark completed — those
+        rows are exactly what its retry resumes from."""
+        with pytest.raises(ValueError, match="resource blew up"):
+            with CheckpointManager(CKPT_PIPELINE, "events", frequency=1) as mgr:
+                mgr.save_checkpoint("cursor-1", [{"id": 1}])
+                raise ValueError("resource blew up")
+
+        with CheckpointManager(CKPT_PIPELINE, "events", frequency=1) as reader:
+            assert reader.get_last_checkpoint() == "cursor-1"
+
+    def test_checkpoint_write_failure_is_loud_but_not_fatal(self, duckdb_pipeline, monkeypatch, caplog):
+        """The one deliberate asymmetry: a lost checkpoint WRITE only costs
+        re-work on a future resume and never changes what this run extracts, so
+        the healthy extract continues — at ERROR, never swallowed."""
+        _fail_sql_matching(monkeypatch, "execute_sql", "INSERT INTO")
+
+        with caplog.at_level(logging.ERROR):
+            with CheckpointManager(CKPT_PIPELINE, "events", frequency=1) as mgr:
+                mgr.save_checkpoint("cursor-1", [{"id": 1}])
+                assert mgr.page_count == 1
+
+        failures = [record for record in caplog.records if "Failed to save checkpoint" in record.getMessage()]
+        assert [record.levelname for record in failures] == ["ERROR"]
+
+
+class TestResumePointSelection:
+    def test_resume_uses_the_highest_page_not_the_newest_row(self, duckdb_pipeline):
+        """page_number is the run's monotonic key. Ordering on created_at alone
+        ties whenever two checkpoints land inside one timestamp tick, and can
+        then resume from a checkpoint behind the one the run reached."""
+        with CheckpointManager(CKPT_PIPELINE, "events", frequency=1) as mgr:
+            mgr.page_count = 2
+            mgr._write_checkpoint("page-2")
+            mgr.page_count = 1
+            mgr._write_checkpoint("page-1")
+
+            # Make the *lower* page unambiguously the newest row by created_at,
+            # so a created_at ordering has to pick the wrong checkpoint.
+            with duckdb_pipeline.sql_client() as client:
+                client.execute_sql(
+                    f"UPDATE {CKPT_DATASET}.{DEFAULT_CHECKPOINT_TABLE} "
+                    "SET created_at = TIMESTAMPTZ '2000-01-01 00:00:00+00' WHERE page_number = 2"
+                )
+
+            assert mgr._load_latest_checkpoint() == "page-2"
+
+
 class TestCheckpointTableSchema:
     """Test checkpoint table schema and SQL operations."""
 
@@ -337,3 +449,94 @@ class TestCheckpointTableSchema:
         """Test custom cleanup days."""
         mgr = CheckpointManager("test_pipeline", "test_resource", cleanup_days=30)
         assert mgr.cleanup_days == 30
+
+
+class TestCleanupCheckpointScope:
+    """`cleanup_checkpoints` prunes completed rows; active ones are resume state.
+
+    The regression these guard: the DELETE carried no status filter, so the
+    manual cleanup verb destroyed `active` rows — the row a crashed extract
+    resumes from — and the next run restarted at its window start, silently
+    re-extracting everything already loaded. Same failure class the manager
+    refuses to cause on a read (TestResumeStateFailures), reached from the
+    other side.
+    """
+
+    @staticmethod
+    def _failed_run(resource: str) -> None:
+        """Leave one `active` checkpoint behind, the way a crashed extract does."""
+        with pytest.raises(ValueError, match="resource blew up"):
+            with CheckpointManager(CKPT_PIPELINE, resource, frequency=1) as mgr:
+                mgr.save_checkpoint(f"{resource}-cursor", [{"id": 1}])
+                raise ValueError("resource blew up")
+
+    @staticmethod
+    def _successful_run(resource: str) -> None:
+        """Leave one `completed` checkpoint behind."""
+        with CheckpointManager(CKPT_PIPELINE, resource, frequency=1) as mgr:
+            mgr.save_checkpoint(f"{resource}-cursor", [{"id": 1}])
+
+    @staticmethod
+    def _statuses(pipeline) -> dict[str, str]:
+        return {cp["resource_name"]: cp["status"] for cp in list_checkpoints(pipeline=pipeline)}
+
+    def test_active_rows_survive_the_default_cleanup(self, duckdb_pipeline):
+        self._failed_run("crashed")
+        self._successful_run("finished")
+
+        cleanup_checkpoints(pipeline=duckdb_pipeline)
+
+        assert self._statuses(duckdb_pipeline) == {"crashed": "active"}
+
+    def test_resume_point_still_reads_after_cleanup(self, duckdb_pipeline):
+        """The property that actually matters: the crashed resource resumes
+        where it stopped instead of re-extracting its whole window."""
+        self._failed_run("crashed")
+
+        cleanup_checkpoints(pipeline=duckdb_pipeline)
+
+        with CheckpointManager(CKPT_PIPELINE, "crashed", frequency=1) as resumed:
+            assert resumed.get_last_checkpoint() == "crashed-cursor"
+
+    def test_include_active_deletes_everything_in_scope(self, duckdb_pipeline):
+        """The destructive form stays reachable — abandoning a poisoned resume
+        point is a real recovery path. It just has to be asked for."""
+        self._failed_run("crashed")
+        self._successful_run("finished")
+
+        cleanup_checkpoints(pipeline=duckdb_pipeline, include_active=True)
+
+        assert list_checkpoints(pipeline=duckdb_pipeline) == []
+
+    def test_kept_active_rows_are_reported(self, duckdb_pipeline, caplog):
+        """Keeping them silently would be its own defect: the operator asked for
+        a cleanup and has to learn what it declined to delete."""
+        self._failed_run("crashed")
+
+        with caplog.at_level(logging.WARNING):
+            cleanup_checkpoints(pipeline=duckdb_pipeline)
+
+        kept = [r for r in caplog.records if "active checkpoint row(s)" in r.getMessage()]
+        assert [r.levelname for r in kept] == ["WARNING"]
+        assert "include_active=True" in kept[0].getMessage()
+
+    def test_no_warning_when_nothing_was_withheld(self, duckdb_pipeline, caplog):
+        self._successful_run("finished")
+
+        with caplog.at_level(logging.WARNING):
+            cleanup_checkpoints(pipeline=duckdb_pipeline)
+
+        assert [r for r in caplog.records if "active checkpoint row(s)" in r.getMessage()] == []
+
+    def test_resource_scope_narrows_both_forms(self, duckdb_pipeline):
+        self._failed_run("crashed")
+        self._failed_run("other")
+
+        cleanup_checkpoints(pipeline=duckdb_pipeline, resource_name="crashed", include_active=True)
+
+        assert self._statuses(duckdb_pipeline) == {"other": "active"}
+
+    def test_missing_table_is_not_an_error(self, duckdb_pipeline):
+        """Nothing has run, so the checkpoint table does not exist yet."""
+        cleanup_checkpoints(pipeline=duckdb_pipeline)
+        cleanup_checkpoints(pipeline=duckdb_pipeline, include_active=True)

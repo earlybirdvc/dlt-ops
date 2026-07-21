@@ -1,36 +1,35 @@
-"""Tests for pipeline cleanup — adapter-routed, destination-agnostic.
+"""Tests for pipeline cleanup — dlt's drop for the remote half, dlt-ops for the rest.
 
-Unit layers drive cleanup through a FakeAdapter at the DestinationAdapter
-boundary; integration layers run real end-to-end cleanup against DuckDB
-(credential-free) and, when POSTGRES_URL is set, against Postgres.
+Unit layers pin the contract at two seams: what cleanup asks *dlt* to drop
+(``pipeline_drop`` stubbed at its import site) and what cleanup itself writes
+through the ``DestinationAdapter`` boundary (a FakeAdapter). Integration layers
+run real end-to-end cleanup against DuckDB (credential-free) and, when
+POSTGRES_URL is set, against Postgres — those are the ones that prove the drop
+actually happened.
 """
 
+import importlib
 import json
 import logging
 import re
 import shutil
 import uuid
-import zlib
 from contextlib import contextmanager
 from os import environ
 from pathlib import Path
+from types import SimpleNamespace
 
 import dlt
 import pytest
 
-from dlt_ops import SourceInfo, _compat
+from dlt_ops import SourceInfo
+from dlt_ops.destinations import UnregisteredDestinationError
 from dlt_ops.discovery import cleanup as cleanup_module
 from dlt_ops.discovery.cleanup import (
     DLT_SYSTEM_TABLES,
-    CleanupUnsupportedError,
     _clean_local_state_selective,
-    _compress_dlt_state,
-    _decode_dlt_schema,
-    _decompress_dlt_state,
-    _get_table_mapping_local,
     clean_pipeline,
     get_cleanup_plan,
-    get_table_mapping,
 )
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -68,25 +67,17 @@ class _FakeCursor:
 
 
 class FakeAdapter:
-    """In-memory DestinationAdapter double recording every boundary call.
-
-    ``execute_query`` routes on the queried system table: ``version_rows``
-    answer the tier-2 ``_dlt_version`` SELECT, ``state_rows`` the
-    ``_dlt_pipeline_state`` join.
-    """
+    """In-memory DestinationAdapter double recording every boundary call."""
 
     name = "fake"
     placeholder_style = "?"
     supports_if_exists = True
-    supports_alter_add_column_if_not_exists = True
     supports_create_schema_if_not_exists = True
     timestamp_now_sql = "CURRENT_TIMESTAMP"
     _identifier_re = re.compile(r"[A-Za-z0-9_]+")
 
-    def __init__(self, existing_tables=(), version_rows=None, state_rows=None):
+    def __init__(self, existing_tables=()):
         self.existing_tables = set(existing_tables)
-        self.version_rows = version_rows or []
-        self.state_rows = state_rows or []
         self.executed: list[tuple[str, tuple]] = []
         self.queried: list[tuple[str, tuple]] = []
         self.dropped: list[str] = []
@@ -107,8 +98,7 @@ class FakeAdapter:
 
     def execute_query(self, client, sql, *params):
         self.queried.append((sql, params))
-        rows = self.version_rows if "_dlt_version" in sql else self.state_rows
-        return _FakeCursor(rows)
+        return _FakeCursor([])
 
     def table_exists(self, client, dataset, table):
         return table in self.existing_tables
@@ -198,159 +188,216 @@ def no_boundary(monkeypatch):
     monkeypatch.setattr(cleanup_module, "open_destination_boundary", _boundary)
 
 
-# --- dlt-version compat guard ---
+class _FakeSchema:
+    """dlt Schema stand-in exposing exactly what cleanup derives its SQL from.
+
+    ``naming`` defaults to identity; a test can pass a folding one to prove the
+    bookkeeping SQL follows dlt's naming convention instead of a hardcoded
+    snake_case literal.
+    """
+
+    def __init__(self, name, naming=None, prefix="_dlt_"):
+        self.name = name
+        self.state_table_name = f"{prefix}pipeline_state"
+        self.loads_table_name = f"{prefix}loads"
+        self.version_table_name = f"{prefix}version"
+        self.naming = naming or SimpleNamespace(normalize_path=lambda column: column)
 
 
-class TestCompatGuard:
-    def test_supported_minors_match_ci_pin_file(self):
-        """_compat's range and ci/dlt-versions.txt are one source of truth."""
-        pin_file = REPO_ROOT / "ci" / "dlt-versions.txt"
-        pinned = tuple(
-            line.strip()
-            for line in pin_file.read_text().splitlines()
-            if line.strip() and not line.strip().startswith("#")
-        )
-        assert pinned == _compat.SUPPORTED_DLT_MINORS
+class _FakeDrop:
+    """Stand-in for a prepared ``pipeline_drop``: inspectable, and callable to execute."""
 
-    @pytest.mark.parametrize(
-        ("version", "supported"),
-        [("1.27.0", True), ("1.28.3", True), ("1.29.0", True), ("1.26.9", False), ("2.0.0", False), ("junk", False)],
+    def __init__(self, recorder, **kwargs):
+        self._recorder = recorder
+        self.info = dict(recorder.info)
+        recorder.constructed.append(kwargs)
+
+    @property
+    def is_empty(self):
+        return not (self.info["tables"] or self.info["resource_states"])
+
+    def __call__(self):
+        self._recorder.executed += 1
+
+
+@pytest.fixture
+def dlt_drop(monkeypatch):
+    """Stub dlt's drop at the seam cleanup resolves it through.
+
+    ``_prepare_drop`` imports ``pipeline_drop`` from ``dlt.pipeline.helpers`` at
+    call time, so patching the helper module intercepts the real lookup. The
+    synced pipeline is stubbed alongside it because building one means talking
+    to a destination.
+    """
+    recorder = SimpleNamespace(
+        constructed=[],
+        executed=0,
+        default_schema_name="test_source",
+        schema=None,  # set to a _FakeSchema to override the default
+        info={
+            "tables": ["test_organizations"],
+            "tables_with_data": ["test_organizations"],
+            "resource_states": ["organizations"],
+            "warnings": [],
+            "schema_name": "test_source",
+        },
     )
-    def test_is_dlt_version_supported(self, version, supported):
-        assert _compat.is_dlt_version_supported(version) is supported
 
-    def test_unsupported_version_fails_clean(self, monkeypatch, dlt_home):
-        monkeypatch.setattr(_compat, "installed_dlt_version", lambda: "1.99.0")
-        with pytest.raises(CleanupUnsupportedError) as excinfo:
-            clean_pipeline(make_source(), None, local=True, remote=False, dataset_name=None)
-        message = str(excinfo.value)
-        assert "1.99.0" in message
-        assert _compat.supported_dlt_range() in message
-        assert "pipeline.drop()" in message
-
-    def test_unsupported_version_fails_plan(self, monkeypatch, dlt_home):
-        monkeypatch.setattr(_compat, "installed_dlt_version", lambda: "0.5.0")
-        with pytest.raises(CleanupUnsupportedError):
-            get_cleanup_plan(make_source(), None, local=True, remote=False, dataset_name=None)
-
-    def test_supported_version_passes_guard(self, monkeypatch, dlt_home):
-        monkeypatch.setattr(_compat, "installed_dlt_version", lambda: f"{_compat.SUPPORTED_DLT_MINORS[0]}.5")
-        result = clean_pipeline(make_source(), None, local=True, remote=False, dataset_name=None)
-        assert result == {"local": [], "remote": []}
-
-
-# --- Codec tests ---
-
-
-class TestCodec:
-    def test_state_roundtrip(self):
-        state = {"key": "value", "nested": {"a": 1}}
-        assert _decompress_dlt_state(_compress_dlt_state(state)) == state
-
-    def test_state_decompress_raw_json_fallback(self):
-        raw = json.dumps({"key": "value"})
-        assert _decompress_dlt_state(raw) == {"key": "value"}
-
-    def test_schema_decode_raw_json_is_primary(self):
-        """_dlt_version.schema is stored as raw JSON on every verified destination."""
-        schema = {"tables": {"orgs": {"resource": "organizations"}}}
-        assert _decode_dlt_schema(json.dumps(schema)) == schema
-
-    def test_schema_decode_accepts_compressed_fallback(self):
-        schema = {"tables": {"orgs": {"resource": "organizations"}}}
-        assert _decode_dlt_schema(_compress_dlt_state(schema)) == schema
-
-    def test_state_compressed_blob_is_zlib_b64(self):
-        import base64
-
-        blob = _compress_dlt_state({"k": 1})
-        assert json.loads(zlib.decompress(base64.b64decode(blob, validate=True))) == {"k": 1}
-
-
-# --- Table mapping tests ---
-
-
-class TestTableMapping:
-    def test_tier1_local_schema(self, local_pipeline_dir):
-        mapping = _get_table_mapping_local("test_source_pipeline", "test_source")
-        assert mapping == {"organizations": "test_organizations", "lists": "test_lists"}
-
-    def test_tier1_absent_returns_none(self, dlt_home):
-        assert _get_table_mapping_local("missing_pipeline", "missing") is None
-
-    def test_tier2_remote_schema_via_adapter(self, dlt_home):
-        """Tier 2 decodes the raw-JSON schema from _dlt_version through the adapter."""
-        schema = {"tables": {"orgs_tbl": {"resource": "organizations"}, "_dlt_loads": {}}}
-        fake = FakeAdapter(existing_tables={"_dlt_version"}, version_rows=[(json.dumps(schema),)])
-
-        mapping = get_table_mapping(make_source(), "test_source_pipeline", "test_source", "ds", fake, client=object())
-
-        assert mapping == {"organizations": "orgs_tbl"}
-        [(sql, params)] = fake.queried
-        assert '"ds"."_dlt_version"' in sql
-        assert params == ("test_source",)
-
-    def test_tier2_skipped_when_version_table_absent(self, dlt_home):
-        fake = FakeAdapter(existing_tables=set())
-        source = make_source(resources=("organizations",))
-
-        mapping = get_table_mapping(source, "test_source_pipeline", "test_source", "ds", fake, client=object())
-
-        assert mapping == {"organizations": "organizations"}  # degraded to tier 3 convention
-        assert fake.queried == []  # absence detected via table_exists, not a failed SELECT
-
-    def test_tier3_source_instantiation(self, dlt_home):
-        class _Res:
-            table_name = "custom_table"
-
-        class _Src:
-            resources = {"organizations": _Res()}
-
-        source = make_source(source_fn=lambda: _Src())
-        mapping = get_table_mapping(source, "test_pipeline", "test", None)
-        assert mapping["organizations"] == "custom_table"
-        # "lists" not in the instantiated source, falls back to resource name
-        assert mapping["lists"] == "lists"
-
-    def test_tier3_not_importable_degrades_to_convention(self, dlt_home, caplog):
-        """Phase-1-only record with nothing to import -> convention + warning."""
-        source = make_source(resources=("a_res", "b_res"))
-        with caplog.at_level(logging.WARNING, logger="dlt_ops.discovery.cleanup"):
-            mapping = get_table_mapping(source, "test_source_pipeline", "test_source", None)
-        assert mapping == {"a_res": "a_res", "b_res": "b_res"}
-        assert any("resource_name == table_name" in record.message for record in caplog.records)
-
-    def test_tier3_import_failure_degrades_to_convention(self, dlt_home, make_project, caplog):
-        """A module that raises at import runs through Phase-2 introspect and degrades."""
-        root = make_project(files={"broken/source/broken_api.py": "raise RuntimeError('boom at import')\n"})
-        source = SourceInfo(
-            name="broken_api",
-            pipeline_name="broken",
-            path=root / "broken",
-            function_name="broken_api_source",
-            resources=("a_res", "b_res"),
-            module_stem="broken_api",
-            module_path=root / "broken" / "source" / "broken_api.py",
+    @contextmanager
+    def _synced(pipeline_name, destination, dataset_name):
+        name = recorder.default_schema_name
+        schema = recorder.schema or (_FakeSchema(name) if name else None)
+        yield SimpleNamespace(
+            pipeline_name=pipeline_name,
+            dataset_name=dataset_name,
+            default_schema_name=name,
+            schemas={schema.name: schema} if schema else {},
         )
 
+    def _factory(pipeline, **kwargs):
+        return _FakeDrop(recorder, pipeline=pipeline, **kwargs)
+
+    # `dlt.pipeline` is a function shadowing the module of the same name, so the
+    # helper module has to be resolved through importlib rather than attribute
+    # lookup — which is exactly how `_prepare_drop`'s local import resolves it.
+    helpers = importlib.import_module("dlt.pipeline.helpers")
+    monkeypatch.setattr(cleanup_module, "_synced_drop_pipeline", _synced)
+    monkeypatch.setattr(helpers, "pipeline_drop", _factory)
+    return recorder
+
+
+# --- What cleanup asks dlt to drop ---
+
+
+class TestRemoteDropDelegation:
+    def test_full_clean_asks_dlt_for_drop_all(self, fake_boundary, dlt_drop, dlt_home):
+        clean_pipeline(
+            source=make_source(),
+            resources=None,
+            local=False,
+            remote=True,
+            dataset_name="test_dataset",
+            destination="fake",
+        )
+
+        [call] = dlt_drop.constructed
+        assert call["drop_all"] is True
+        assert call["resources"] == []
+        assert call["schema_name"] == "test_source"
+        assert dlt_drop.executed == 1
+
+    def test_selective_clean_passes_exact_resource_names(self, fake_boundary, dlt_drop, dlt_home):
+        clean_pipeline(
+            source=make_source(),
+            resources=["organizations"],
+            local=False,
+            remote=True,
+            dataset_name="test_dataset",
+            destination="fake",
+        )
+
+        [call] = dlt_drop.constructed
+        assert call["drop_all"] is False
+        assert call["resources"] == ["organizations"]
+        assert dlt_drop.executed == 1
+
+    def test_result_reports_dropped_tables_and_reset_states(self, fake_boundary, dlt_drop, dlt_home):
+        result = clean_pipeline(
+            source=make_source(),
+            resources=["organizations"],
+            local=False,
+            remote=True,
+            dataset_name="test_dataset",
+            destination="fake",
+        )
+
+        assert "table: test_organizations" in result["remote"]
+        assert "state: reset organizations" in result["remote"]
+
+    def test_schema_only_table_is_not_reported_as_dropped(self, fake_boundary, dlt_drop, dlt_home):
+        """A table dlt removes from the schema but that never materialized is not a drop."""
+        dlt_drop.info = {**dlt_drop.info, "tables": ["test_organizations", "never_loaded"]}
+
+        result = clean_pipeline(
+            source=make_source(),
+            resources=["organizations"],
+            local=False,
+            remote=True,
+            dataset_name="test_dataset",
+            destination="fake",
+        )
+
+        assert "table: test_organizations" in result["remote"]
+        assert not any("never_loaded" in item for item in result["remote"])
+
+    def test_empty_drop_is_never_executed(self, fake_boundary, dlt_drop, dlt_home):
+        """Nothing selected means nothing runs — no empty load package against the destination."""
+        dlt_drop.info = {**dlt_drop.info, "tables": [], "tables_with_data": [], "resource_states": []}
+
+        result = clean_pipeline(
+            source=make_source(),
+            resources=["organizations"],
+            local=False,
+            remote=True,
+            dataset_name="test_dataset",
+            destination="fake",
+        )
+
+        assert dlt_drop.executed == 0
+        assert not any(item.startswith("table:") for item in result["remote"])
+
+    def test_absent_remote_state_skips_the_drop_but_still_cleans_dlt_ops_rows(self, fake_boundary, dlt_drop, dlt_home):
+        """A destination dlt knows nothing about is a no-op for dlt, not an error."""
+        dlt_drop.default_schema_name = None
+        fake_boundary.existing_tables = {"_dlt_custom_checkpoints"}
+
+        result = clean_pipeline(
+            source=make_source(),
+            resources=["organizations"],
+            local=False,
+            remote=True,
+            dataset_name="test_dataset",
+            destination="fake",
+        )
+
+        assert dlt_drop.constructed == []
+        assert dlt_drop.executed == 0
+        assert "checkpoint: organizations" in result["remote"]
+
+    def test_drop_warnings_are_surfaced(self, fake_boundary, dlt_drop, dlt_home, caplog):
+        dlt_drop.info = {**dlt_drop.info, "warnings": ["resource matched no tables"]}
+
         with caplog.at_level(logging.WARNING, logger="dlt_ops.discovery.cleanup"):
-            mapping = get_table_mapping(source, "broken_api_pipeline", "broken_api", None)
+            clean_pipeline(
+                source=make_source(),
+                resources=["organizations"],
+                local=False,
+                remote=True,
+                dataset_name="test_dataset",
+                destination="fake",
+            )
 
-        assert mapping == {"a_res": "a_res", "b_res": "b_res"}
-        assert any("resource_name == table_name" in record.message for record in caplog.records)
+        assert any("resource matched no tables" in record.message for record in caplog.records)
 
-    def test_cascade_local_first(self, local_pipeline_dir):
-        """Local schema wins; the source is never instantiated."""
+    def test_drop_runs_on_a_throwaway_dir_so_remote_only_keeps_local_state(
+        self, fake_boundary, dlt_drop, local_pipeline_dir
+    ):
+        """--remote-only must not rewrite local state, and dlt's drop is a pipeline run."""
+        clean_pipeline(
+            source=make_source(),
+            resources=["organizations"],
+            local=False,
+            remote=True,
+            dataset_name="test_dataset",
+            destination="fake",
+        )
 
-        def _explode():
-            raise AssertionError("source_fn must not be called when tier 1 resolves")
-
-        source = make_source(source_fn=_explode)
-        mapping = get_table_mapping(source, "test_source_pipeline", "test_source", "ds")
-        assert mapping == {"organizations": "test_organizations", "lists": "test_lists"}
+        state = json.loads((local_pipeline_dir / "state.json").read_text())
+        assert sorted(state["sources"]["test_source"]["resources"]) == ["lists", "organizations"]
+        assert (local_pipeline_dir / "schemas" / "test_source.schema.json").exists()
 
 
-# --- Local state modification tests ---
+# --- Local state modification ---
 
 
 class TestLocalStateModification:
@@ -378,12 +425,44 @@ class TestLocalStateModification:
         empty_dir.mkdir()
         assert _clean_local_state_selective(empty_dir, "test_source", ["organizations"]) == []
 
+    def test_unknown_state_engine_version_refuses(self, local_pipeline_dir):
+        """The one dlt-owned file cleanup still hand-edits checks the layout dlt stamped.
 
-# --- Full cleanup (adapter fakes) ---
+        A silent pass here would report a reset that never happened, so the
+        refusal is loud and names the way out.
+        """
+        state_path = local_pipeline_dir / "state.json"
+        state = json.loads(state_path.read_text())
+        state["_state_engine_version"] = 99
+        state_path.write_text(json.dumps(state))
+
+        with pytest.raises(RuntimeError, match="state engine version"):
+            _clean_local_state_selective(local_pipeline_dir, "test_source", ["organizations"])
+
+        # Nothing was half-done: the resource is still there and so is the schema.
+        after = json.loads(state_path.read_text())
+        assert "organizations" in after["sources"]["test_source"]["resources"]
+        assert (local_pipeline_dir / "schemas" / "test_source.schema.json").exists()
+
+    def test_real_dlt_state_carries_the_engine_version_we_check(self, tmp_path):
+        """The guard reads a key dlt actually writes — not one invented here."""
+        pipeline = dlt.pipeline(
+            pipeline_name="engine_probe_pipeline",
+            destination=dlt.destinations.duckdb(str(tmp_path / "probe.duckdb")),
+            dataset_name="probe_ds",
+            pipelines_dir=str(tmp_path / "home"),
+        )
+        pipeline.run([{"id": 1}], table_name="rows")
+
+        state = json.loads((tmp_path / "home" / "engine_probe_pipeline" / "state.json").read_text())
+        assert state["_state_engine_version"] == cleanup_module._STATE_ENGINE_VERSION
+
+
+# --- Full cleanup ---
 
 
 class TestFullCleanup:
-    def test_full_local_and_remote(self, fake_boundary, local_pipeline_dir):
+    def test_full_local_and_remote(self, fake_boundary, dlt_drop, local_pipeline_dir):
         fake_boundary.existing_tables = set(DLT_SYSTEM_TABLES)
 
         result = clean_pipeline(
@@ -399,11 +478,11 @@ class TestFullCleanup:
         assert not local_pipeline_dir.exists()
         assert result["local"] == [str(local_pipeline_dir)]
 
-        # Data tables dropped (mapping came from the local schema, tier 1)
-        assert sorted(fake_boundary.dropped) == ["test_lists", "test_organizations"]
+        # dlt dropped the data tables; cleanup never issues its own DROP
+        assert dlt_drop.executed == 1
+        assert fake_boundary.dropped == []
 
         # System tables: DELETE rows, never DROP
-        assert not any(table in fake_boundary.dropped for table in DLT_SYSTEM_TABLES)
         deletes = [(sql, params) for sql, params in fake_boundary.executed if sql.startswith("DELETE")]
         delete_text = " | ".join(sql for sql, _ in deletes)
         assert '"test_dataset"."_dlt_pipeline_state"' in delete_text
@@ -413,7 +492,7 @@ class TestFullCleanup:
         assert ("test_source",) in [params for _, params in deletes]  # schema-scoped filter
         assert any("state: _dlt_pipeline_state (rows deleted)" == item for item in result["remote"])
 
-    def test_full_deletes_checkpoint_rows_when_table_exists(self, fake_boundary, local_pipeline_dir):
+    def test_full_deletes_checkpoint_rows_when_table_exists(self, fake_boundary, dlt_drop, local_pipeline_dir):
         fake_boundary.existing_tables = {*DLT_SYSTEM_TABLES, "_dlt_custom_checkpoints"}
 
         result = clean_pipeline(
@@ -436,7 +515,7 @@ class TestFullCleanup:
         ]
         assert "state: _dlt_custom_checkpoints (rows deleted)" in result["remote"]
 
-    def test_absent_system_tables_are_skipped(self, fake_boundary, dlt_home):
+    def test_absent_system_tables_are_skipped(self, fake_boundary, dlt_drop, dlt_home):
         """Missing tables are detected via table_exists, not error-string matching."""
         fake_boundary.existing_tables = set()  # nothing exists remotely
 
@@ -449,8 +528,34 @@ class TestFullCleanup:
             destination="fake",
         )
 
-        assert [item for item in result["remote"] if item.startswith("state:")] == []
+        assert [item for item in result["remote"] if item.startswith("state: _dlt")] == []
         assert all(not sql.startswith("DELETE") for sql, _ in fake_boundary.executed)
+
+    def test_system_table_sql_follows_dlts_naming_convention(self, fake_boundary, dlt_drop, dlt_home):
+        """dlt normalizes its own identifiers before writing them, so cleanup asks
+        the schema for them instead of hardcoding snake_case."""
+        dlt_drop.schema = _FakeSchema(
+            "test_source",
+            naming=SimpleNamespace(normalize_path=str.upper),
+            prefix="XDLT_",
+        )
+        fake_boundary.existing_tables = {"XDLT_pipeline_state", "XDLT_loads", "XDLT_version"}
+
+        clean_pipeline(
+            source=make_source(),
+            resources=None,
+            local=False,
+            remote=True,
+            dataset_name="test_dataset",
+            destination="fake",
+        )
+
+        deletes = [sql for sql, _ in fake_boundary.executed if sql.startswith("DELETE")]
+        assert any('"XDLT_pipeline_state" WHERE "PIPELINE_NAME"' in sql for sql in deletes)
+        assert any('"XDLT_loads" WHERE "SCHEMA_NAME"' in sql for sql in deletes)
+        assert any('"XDLT_version" WHERE "SCHEMA_NAME"' in sql for sql in deletes)
+        # No hardcoded snake_case leaked through alongside the derived names.
+        assert not any("_dlt_pipeline_state" in sql for sql in deletes)
 
     def test_local_only_never_opens_destination(self, no_boundary, local_pipeline_dir):
         result = clean_pipeline(
@@ -483,98 +588,11 @@ class TestFullCleanup:
             clean_pipeline(make_source(), None, local=False, remote=True, dataset_name="ds")
 
 
-# --- Selective cleanup (adapter fakes) ---
-
-
-def _fake_state(resources: dict) -> dict:
-    return {
-        "_state_version": 5,
-        "_state_engine_version": 4,
-        "_version_hash": "abc",
-        "destination_name": "fake",
-        "destination_type": "dlt.destinations.fake",
-        "dataset_name": "test_dataset",
-        "sources": {"test_source": {"resources": resources}},
-    }
+# --- Selective cleanup ---
 
 
 class TestSelectiveCleanup:
-    def test_selective_drops_only_target_tables(self, fake_boundary, local_pipeline_dir):
-        result = clean_pipeline(
-            source=make_source(),
-            resources=["organizations"],
-            local=False,
-            remote=True,
-            dataset_name="test_dataset",
-            destination="fake",
-        )
-
-        assert fake_boundary.dropped == ["test_organizations"]
-        assert "table: test_organizations" in result["remote"]
-        assert not any("test_lists" in item for item in result["remote"])
-
-    def test_selective_state_surgery_roundtrips_blob(self, fake_boundary, local_pipeline_dir):
-        """Surgery decodes the stored blob, removes the resource, re-encodes the SAME dict."""
-        state = _fake_state(
-            {
-                "organizations": {"incremental": {"cursor": {"last_value": "v1"}}},
-                "lists": {"incremental": {"cursor": {"last_value": "v2"}}},
-            }
-        )
-        fake_boundary.existing_tables = set(DLT_SYSTEM_TABLES)
-        fake_boundary.state_rows = [(_compress_dlt_state(state), 5, "abc")]
-
-        result = clean_pipeline(
-            source=make_source(),
-            resources=["organizations"],
-            local=False,
-            remote=True,
-            dataset_name="test_dataset",
-            destination="fake",
-        )
-
-        inserts = [(sql, params) for sql, params in fake_boundary.executed if sql.startswith("INSERT")]
-        assert len(inserts) == 2
-        loads_insert, state_insert = inserts
-        assert "_dlt_loads" in loads_insert[0]
-        load_id, schema_name, version_hash = loads_insert[1]
-        assert load_id.isdigit()  # time_ns: sorts after every dlt epoch-seconds load_id
-        assert schema_name == "test_source"
-        assert version_hash == "abc"
-
-        assert "_dlt_pipeline_state" in state_insert[0]
-        version, engine_version, pipeline_name, blob, hash_param, load_id_param, _dlt_id = state_insert[1]
-        assert (version, engine_version, pipeline_name) == (6, 4, "test_source_pipeline")
-        assert (hash_param, load_id_param) == ("abc", load_id)
-
-        rewritten = _decompress_dlt_state(blob)
-        assert "organizations" not in rewritten["sources"]["test_source"]["resources"]
-        assert rewritten["sources"]["test_source"]["resources"]["lists"] == {
-            "incremental": {"cursor": {"last_value": "v2"}}
-        }
-        # Destination-naming values survive the roundtrip untouched
-        assert rewritten["destination_name"] == "fake"
-        assert rewritten["dataset_name"] == "test_dataset"
-        assert rewritten["_state_version"] == 6
-        assert "state: updated (removed 1 resource(s))" in result["remote"]
-
-    def test_selective_without_remote_state_inserts_nothing(self, fake_boundary, local_pipeline_dir):
-        fake_boundary.existing_tables = set(DLT_SYSTEM_TABLES)
-        fake_boundary.state_rows = []
-
-        result = clean_pipeline(
-            source=make_source(),
-            resources=["organizations"],
-            local=False,
-            remote=True,
-            dataset_name="test_dataset",
-            destination="fake",
-        )
-
-        assert all(not sql.startswith("INSERT") for sql, _ in fake_boundary.executed)
-        assert not any(item.startswith("state:") for item in result["remote"])
-
-    def test_selective_deletes_checkpoints_per_resource(self, fake_boundary, local_pipeline_dir):
+    def test_selective_deletes_checkpoints_per_resource(self, fake_boundary, dlt_drop, local_pipeline_dir):
         fake_boundary.existing_tables = {"_dlt_custom_checkpoints"}
 
         result = clean_pipeline(
@@ -593,6 +611,23 @@ class TestSelectiveCleanup:
         ]
         assert "checkpoint: organizations" in result["remote"]
         assert "checkpoint: lists" in result["remote"]
+
+    def test_selective_leaves_dlt_system_tables_alone(self, fake_boundary, dlt_drop, local_pipeline_dir):
+        """Surviving resources still own the dataset's load history."""
+        fake_boundary.existing_tables = {*DLT_SYSTEM_TABLES, "_dlt_custom_checkpoints"}
+
+        clean_pipeline(
+            source=make_source(),
+            resources=["organizations"],
+            local=False,
+            remote=True,
+            dataset_name="test_dataset",
+            destination="fake",
+        )
+
+        touched = " | ".join(sql for sql, _ in fake_boundary.executed)
+        for table in DLT_SYSTEM_TABLES:
+            assert table not in touched
 
     def test_selective_local_updates_state_keeps_dir(self, no_boundary, local_pipeline_dir):
         result = clean_pipeline(
@@ -625,34 +660,104 @@ class TestValidation:
                 destination="fake",
             )
 
+    def test_regex_selector_is_refused(self, dlt_home):
+        """dlt reads `re:` as a pattern; clean promises exact names, so it refuses."""
+        source = make_source(resources=("organizations", "re:.*"))
+        with pytest.raises(ValueError, match="exact names, not patterns"):
+            clean_pipeline(
+                source=source,
+                resources=["re:.*"],
+                local=False,
+                remote=True,
+                dataset_name="test_dataset",
+                destination="fake",
+            )
+
+    def test_validation_runs_before_anything_is_touched(self, no_boundary, local_pipeline_dir):
+        with pytest.raises(ValueError):
+            clean_pipeline(
+                source=make_source(),
+                resources=["nonexistent"],
+                local=True,
+                remote=True,
+                dataset_name="test_dataset",
+                destination="fake",
+            )
+        assert local_pipeline_dir.exists()
+
+    def test_unknown_local_state_engine_refuses_before_the_remote_drop(
+        self, fake_boundary, dlt_drop, local_pipeline_dir
+    ):
+        """A refusal that fired after the drop would leave a half-cleaned pipeline."""
+        state_path = local_pipeline_dir / "state.json"
+        state = json.loads(state_path.read_text())
+        state["_state_engine_version"] = 99
+        state_path.write_text(json.dumps(state))
+
+        with pytest.raises(RuntimeError, match="state engine version"):
+            clean_pipeline(
+                source=make_source(),
+                resources=["organizations"],
+                local=True,
+                remote=True,
+                dataset_name="test_dataset",
+                destination="fake",
+            )
+
+        assert dlt_drop.constructed == []
+        assert dlt_drop.executed == 0
+        assert fake_boundary.executed == []
+
+    def test_full_clean_ignores_the_state_engine_version(self, fake_boundary, dlt_drop, local_pipeline_dir):
+        """A full clean deletes the working dir outright, so it never reads the layout."""
+        state_path = local_pipeline_dir / "state.json"
+        state = json.loads(state_path.read_text())
+        state["_state_engine_version"] = 99
+        state_path.write_text(json.dumps(state))
+
+        result = clean_pipeline(
+            source=make_source(),
+            resources=None,
+            local=True,
+            remote=True,
+            dataset_name="test_dataset",
+            destination="fake",
+        )
+
+        assert not local_pipeline_dir.exists()
+        assert result["local"] == [str(local_pipeline_dir)]
+
 
 # --- Cleanup plan ---
 
 
 class TestCleanupPlan:
-    def test_full_plan(self, no_boundary, local_pipeline_dir):
+    def test_full_plan(self, fake_boundary, dlt_drop, local_pipeline_dir):
         plan = get_cleanup_plan(
             source=make_source(),
             resources=None,
             local=True,
             remote=True,
             dataset_name="test_dataset",
+            destination="fake",
         )
 
         assert plan["pipeline_name"] == "test_source_pipeline"
         assert plan["schema_name"] == "test_source"
         assert plan["is_full"] is True
         assert plan["local_exists"] is True
-        assert sorted(plan["data_tables"]) == ["test_lists", "test_organizations"]
+        assert plan["data_tables"] == ["test_organizations"]
+        assert plan["resource_states"] == ["organizations"]
         assert plan["system_tables"] == list(DLT_SYSTEM_TABLES)
 
-    def test_selective_plan(self, no_boundary, local_pipeline_dir):
+    def test_selective_plan(self, fake_boundary, dlt_drop, local_pipeline_dir):
         plan = get_cleanup_plan(
             source=make_source(),
             resources=["organizations"],
             local=True,
             remote=True,
             dataset_name="test_dataset",
+            destination="fake",
         )
 
         assert plan["is_full"] is False
@@ -660,41 +765,160 @@ class TestCleanupPlan:
         assert plan["data_tables"] == ["test_organizations"]
         assert plan["system_tables"] == []  # No system tables for selective
 
-    def test_plan_degrades_when_destination_unreachable(self, monkeypatch, dlt_home, caplog):
-        """A boundary failure downgrades the plan to local/source tiers instead of dying."""
+    def test_plan_never_executes_the_drop(self, fake_boundary, dlt_drop, local_pipeline_dir):
+        """The dry run is a constructed pipeline_drop that is read, never called."""
+        get_cleanup_plan(
+            source=make_source(),
+            resources=None,
+            local=True,
+            remote=True,
+            dataset_name="test_dataset",
+            destination="fake",
+        )
+
+        assert len(dlt_drop.constructed) == 1
+        assert dlt_drop.executed == 0
+        assert fake_boundary.executed == []  # and no dlt-ops SQL either
+
+    def test_plan_lists_the_tables_dlt_would_really_drop(self, fake_boundary, dlt_drop, dlt_home):
+        """Nested child tables come from dlt's schema, not from a naming guess."""
+        dlt_drop.info = {
+            **dlt_drop.info,
+            "tables": ["test_organizations__tags", "test_organizations"],
+            "tables_with_data": ["test_organizations__tags", "test_organizations"],
+        }
+
+        plan = get_cleanup_plan(
+            source=make_source(),
+            resources=["organizations"],
+            local=False,
+            remote=True,
+            dataset_name="test_dataset",
+            destination="fake",
+        )
+
+        assert plan["data_tables"] == ["test_organizations__tags", "test_organizations"]
+
+    def test_plan_degrades_when_destination_unreachable(self, fake_boundary, monkeypatch, dlt_home, caplog):
+        """A boundary failure downgrades the plan to its local half plus a warning."""
 
         @contextmanager
         def _broken(pipeline_name, destination, dataset_name):
             raise RuntimeError("no credentials")
             yield  # pragma: no cover
 
-        monkeypatch.setattr(cleanup_module, "open_destination_boundary", _broken)
+        monkeypatch.setattr(cleanup_module, "_synced_drop_pipeline", _broken)
         source = make_source(resources=("organizations",))
 
         with caplog.at_level(logging.WARNING, logger="dlt_ops.discovery.cleanup"):
             plan = get_cleanup_plan(source, None, local=False, remote=True, dataset_name="ds", destination="fake")
 
-        assert plan["data_tables"] == ["organizations"]  # tier-3 convention
+        assert plan["data_tables"] == []
+        assert any("no credentials" in warning for warning in plan["warnings"])
         assert any("Failed to open destination for cleanup plan" in record.message for record in caplog.records)
 
+    def test_plan_degrades_when_the_boundary_itself_fails(self, monkeypatch, dlt_home):
+        """A credentials/network failure is transient — warn, don't kill the dry run."""
 
-# --- Injection regression: hostile names are params or adapter-quoted, never text ---
+        @contextmanager
+        def _broken(pipeline_name, destination, dataset_name):
+            raise RuntimeError("connection refused")
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(cleanup_module, "open_destination_boundary", _broken)
+
+        plan = get_cleanup_plan(
+            source=make_source(), resources=None, local=False, remote=True, dataset_name="ds", destination="fake"
+        )
+
+        assert plan["data_tables"] == []
+        assert any("connection refused" in warning for warning in plan["warnings"])
+
+    def test_plan_warns_when_the_destination_holds_no_state(self, fake_boundary, dlt_drop, dlt_home):
+        dlt_drop.default_schema_name = None
+
+        plan = get_cleanup_plan(
+            source=make_source(),
+            resources=None,
+            local=False,
+            remote=True,
+            dataset_name="test_dataset",
+            destination="fake",
+        )
+
+        assert plan["data_tables"] == []
+        assert any("nothing to drop" in warning for warning in plan["warnings"])
+
+    def test_plan_refuses_a_core_mode_destination(self, monkeypatch, dlt_home):
+        """A dry run must refuse what execution would refuse, not print a plan."""
+
+        @contextmanager
+        def _core_mode(pipeline_name, destination, dataset_name):
+            raise UnregisteredDestinationError("no adapter")
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(cleanup_module, "open_destination_boundary", _core_mode)
+
+        with pytest.raises(UnregisteredDestinationError):
+            get_cleanup_plan(
+                source=make_source(),
+                resources=None,
+                local=True,
+                remote=True,
+                dataset_name="ds",
+                destination="filesystem",
+            )
+
+    def test_local_only_plan_never_opens_destination(self, no_boundary, local_pipeline_dir):
+        plan = get_cleanup_plan(
+            source=make_source(),
+            resources=None,
+            local=True,
+            remote=False,
+            dataset_name=None,
+        )
+        assert plan["local_exists"] is True
+        assert plan["data_tables"] == []
+
+
+# --- Safety: a core-mode refusal must land before anything is destroyed ---
+
+
+class TestCoreModeRefusal:
+    def test_clean_refuses_before_asking_dlt_to_drop(self, monkeypatch, dlt_drop, local_pipeline_dir):
+        @contextmanager
+        def _core_mode(pipeline_name, destination, dataset_name):
+            raise UnregisteredDestinationError("no adapter")
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(cleanup_module, "open_destination_boundary", _core_mode)
+
+        with pytest.raises(UnregisteredDestinationError):
+            clean_pipeline(
+                source=make_source(),
+                resources=None,
+                local=True,
+                remote=True,
+                dataset_name="ds",
+                destination="filesystem",
+            )
+
+        assert dlt_drop.constructed == []
+        assert dlt_drop.executed == 0
+        assert local_pipeline_dir.exists()  # local half never ran either
+
+
+# --- Injection regression: hostile names are params, adapter-quoted, or escaped literals ---
 
 
 class TestInjectionRegression:
     HOSTILE = 'x"; DROP TABLE users;--'
 
-    def test_hostile_source_and_table_names_never_reach_sql_text(self, fake_boundary, dlt_home):
-        class _Res:
-            table_name = TestInjectionRegression.HOSTILE
-
-        class _Src:
-            resources = {"organizations": _Res()}
-
-        source = make_source(name=self.HOSTILE, resources=("organizations",), source_fn=lambda: _Src())
+    def test_hostile_source_name_never_reaches_sql_text(self, fake_boundary, dlt_drop, dlt_home):
+        source = make_source(name=self.HOSTILE, resources=("organizations",))
         fake_boundary.existing_tables = set(DLT_SYSTEM_TABLES)
 
-        result = clean_pipeline(
+        clean_pipeline(
             source=source,
             resources=None,
             local=False,
@@ -703,18 +927,13 @@ class TestInjectionRegression:
             destination="fake",
         )
 
-        # The hostile table name was refused by the adapter grammar, not interpolated
-        assert fake_boundary.dropped == []
-        assert not any(item.startswith("table:") for item in result["remote"])
-
-        # Hostile pipeline/schema names ride as bound params only
         all_calls = fake_boundary.executed + fake_boundary.queried
         assert all(self.HOSTILE not in sql for sql, _ in all_calls)
         bound_params = [param for _, params in fake_boundary.executed for param in params]
         assert f"{self.HOSTILE}_pipeline" in bound_params  # _dlt_pipeline_state filter
         assert self.HOSTILE in bound_params  # _dlt_version/_dlt_loads schema filter
 
-    def test_hostile_resource_name_bound_in_checkpoint_delete(self, fake_boundary, dlt_home):
+    def test_hostile_resource_name_bound_in_checkpoint_delete(self, fake_boundary, dlt_drop, dlt_home):
         source = make_source(resources=(self.HOSTILE,))
         fake_boundary.existing_tables = {"_dlt_custom_checkpoints"}
 
@@ -735,7 +954,7 @@ class TestInjectionRegression:
             )
         ]
 
-    def test_hostile_dataset_name_refused_by_adapter_grammar(self, fake_boundary, dlt_home):
+    def test_hostile_dataset_name_refused_by_adapter_grammar(self, fake_boundary, dlt_drop, dlt_home):
         fake_boundary.existing_tables = set(DLT_SYSTEM_TABLES)
         source = make_source(resources=("organizations",))
 
@@ -750,20 +969,42 @@ class TestInjectionRegression:
 
         all_calls = fake_boundary.executed + fake_boundary.queried
         assert all(self.HOSTILE not in sql for sql, _ in all_calls)
-        assert result["remote"] == []  # every per-table op degraded with a warning
+        # Every dlt-ops bookkeeping DELETE degraded with a warning rather than
+        # interpolating the name; none reported success.
+        assert not any(item.endswith("(rows deleted)") for item in result["remote"])
+        assert fake_boundary.executed == []
+
+    def test_resource_names_reach_dlt_as_escaped_literals(self):
+        """dlt compiles a bare selector to ^re.escape(name)$ — it cannot widen the selection.
+
+        This is the property that lets cleanup forward resource names straight
+        to `pipeline_drop` instead of pattern-matching them itself.
+        """
+        from dlt.common.schema.utils import compile_simple_regexes
+        from dlt.common.schema.typing import TSimpleRegex
+
+        pattern = compile_simple_regexes([TSimpleRegex(self.HOSTILE)])
+        assert pattern.match(self.HOSTILE)
+        assert not pattern.match("users")
+        assert not pattern.match('x"; DROP TABLE orders;--')
+
+        # A metacharacter in a resource name matches itself, nothing else.
+        dotted = compile_simple_regexes([TSimpleRegex("or.s")])
+        assert dotted.match("or.s")
+        assert not dotted.match("orgs")
 
 
 # --- End-to-end integration: DuckDB always, Postgres when POSTGRES_URL is set ---
 
 
 def _cleanup_test_source():
-    """Two incremental resources; ``orgs`` maps to a custom table name."""
+    """Two incremental resources; ``orgs`` has a custom table name and nested data."""
 
     @dlt.source(name="cats")
     def cats():
         @dlt.resource(name="orgs", table_name="orgs_tbl", write_disposition="append", primary_key="id")
         def orgs(cursor=dlt.sources.incremental("id", initial_value=0)):
-            yield [{"id": 1}, {"id": 2}]
+            yield [{"id": 1, "tags": [{"t": "a"}, {"t": "b"}]}, {"id": 2, "tags": [{"t": "c"}]}]
 
         @dlt.resource(name="depts", write_disposition="append", primary_key="id")
         def depts(cursor=dlt.sources.incremental("id", initial_value=0)):
@@ -850,8 +1091,9 @@ class TestCleanupEndToEnd:
         assert not e2e["working_dir"].exists()
         assert result["local"] == [str(e2e["working_dir"])]
 
-        # Data tables dropped
+        # Data tables dropped, nested child table included
         assert self._count(e2e, "orgs_tbl") is None
+        assert self._count(e2e, "orgs_tbl__tags") is None
         assert self._count(e2e, "depts") is None
 
         # System tables survive (shared) but carry no rows for this pipeline/schema
@@ -863,7 +1105,9 @@ class TestCleanupEndToEnd:
         assert "table: depts" in result["remote"]
         assert "state: _dlt_pipeline_state (rows deleted)" in result["remote"]
 
-    def test_selective_cleanup_state_surgery_roundtrip(self, e2e):
+    def test_selective_cleanup_drops_one_resource_and_resets_its_state(self, e2e):
+        assert self._count(e2e, "orgs_tbl__tags") == 3
+
         result = clean_pipeline(
             source=e2e["info"],
             resources=["orgs"],
@@ -873,10 +1117,12 @@ class TestCleanupEndToEnd:
             destination=e2e["destination"],
         )
 
-        # Only the target table dropped; the sibling keeps its rows
+        # Target table gone WITH its nested child table; the sibling keeps its rows
         assert self._count(e2e, "orgs_tbl") is None
+        assert self._count(e2e, "orgs_tbl__tags") is None
         assert self._count(e2e, "depts") == 2
         assert "table: orgs_tbl" in result["remote"]
+        assert "state: reset orgs" in result["remote"]
 
         # Local surgery: state entry removed, schema file deleted, dir kept
         assert e2e["working_dir"].exists()
@@ -891,10 +1137,60 @@ class TestCleanupEndToEnd:
         rerun.run(e2e["source_fn"]())
 
         assert self._count(e2e, "orgs_tbl") == 2  # re-ingested from scratch
+        assert self._count(e2e, "orgs_tbl__tags") == 3
         assert self._count(e2e, "depts") == 2  # incremental state preserved, no duplicates
 
-    def test_plan_uses_remote_mapping_without_local_state(self, e2e):
-        """Tier 2 live: with local state gone, the plan reads _dlt_version (raw JSON)."""
+    def test_full_cleanup_leaves_the_dataset_reusable(self, e2e):
+        clean_pipeline(
+            source=e2e["info"],
+            resources=None,
+            local=True,
+            remote=True,
+            dataset_name=e2e["dataset"],
+            destination=e2e["destination"],
+        )
+
+        rerun = dlt.pipeline(pipeline_name="cats_pipeline", destination=e2e["destination"], dataset_name=e2e["dataset"])
+        rerun.run(e2e["source_fn"]())
+
+        assert self._count(e2e, "orgs_tbl") == 2
+        assert self._count(e2e, "depts") == 2
+
+    def test_remote_only_leaves_local_state_untouched(self, e2e):
+        """dlt's drop is a pipeline run; it must not run through the user's working dir."""
+        before = json.loads((e2e["working_dir"] / "state.json").read_text())
+
+        clean_pipeline(
+            source=e2e["info"],
+            resources=["orgs"],
+            local=False,
+            remote=True,
+            dataset_name=e2e["dataset"],
+            destination=e2e["destination"],
+        )
+
+        assert self._count(e2e, "orgs_tbl") is None  # remote really was dropped
+        after = json.loads((e2e["working_dir"] / "state.json").read_text())
+        assert sorted(after["sources"]["cats"]["resources"]) == sorted(before["sources"]["cats"]["resources"])
+        assert (e2e["working_dir"] / "schemas" / "cats.schema.json").exists()
+
+    def test_dry_run_plan_changes_nothing(self, e2e):
+        plan = get_cleanup_plan(
+            source=e2e["info"],
+            resources=["orgs"],
+            local=True,
+            remote=True,
+            dataset_name=e2e["dataset"],
+            destination=e2e["destination"],
+        )
+
+        assert sorted(plan["data_tables"]) == ["orgs_tbl", "orgs_tbl__tags"]
+        assert plan["resource_states"] == ["orgs"]
+        assert self._count(e2e, "orgs_tbl") == 2  # nothing executed
+        assert self._count(e2e, "depts") == 2
+
+    def test_clean_works_without_local_state(self, e2e):
+        """The destination is the source of truth; local state is an optimization."""
         shutil.rmtree(e2e["working_dir"])
         # Phase-1-only record: no source_fn, so only the destination knows orgs -> orgs_tbl
         info = make_source(name="cats", resources=("orgs", "depts"))
@@ -907,6 +1203,35 @@ class TestCleanupEndToEnd:
             dataset_name=e2e["dataset"],
             destination=e2e["destination"],
         )
-
         assert "orgs_tbl" in plan["data_tables"]
-        assert plan["table_mapping"]["orgs"] == "orgs_tbl"
+        assert plan["local_exists"] is False
+
+        clean_pipeline(
+            source=info,
+            resources=None,
+            local=True,
+            remote=True,
+            dataset_name=e2e["dataset"],
+            destination=e2e["destination"],
+        )
+
+        assert self._count(e2e, "orgs_tbl") is None
+        assert self._count(e2e, "depts") is None
+
+    def test_clean_on_a_dataset_dlt_never_touched_is_a_no_op(self, e2e):
+        """No state anywhere is nothing to do — not a PipelineNeverRan traceback."""
+        ghost = make_source(name="ghost", resources=("nothing",))
+
+        result = clean_pipeline(
+            source=ghost,
+            resources=None,
+            local=True,
+            remote=True,
+            dataset_name=e2e["dataset"],
+            destination=e2e["destination"],
+        )
+
+        assert result["local"] == []
+        assert not any(item.startswith("table:") for item in result["remote"])
+        # The real pipeline's data is untouched
+        assert self._count(e2e, "orgs_tbl") == 2

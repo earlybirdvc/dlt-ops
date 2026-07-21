@@ -33,7 +33,16 @@ FAIL_AFTER_PAGE_ENV = "GITHUB_EVENTS_FAIL_AFTER_PAGE"
 EVENTS_INITIAL_TIMESTAMP = datetime(2026, 1, 1, tzinfo=UTC)
 
 
+# extra="forbid" on every model is what turns "the model is the schema" into an
+# enforced contract: dlt reads it as schema_contract columns="freeze", so a
+# field the API adds and the model does not declare fails the extract step.
+# Leave it off and Pydantic's default takes over — dlt derives
+# columns="discard_value" and strips the unknown field from every row without
+# a word. The pydantic_model_forbids_extra rule fails validate on models that
+# omit it.
 class Event(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid")
+
     id: int
     event_type: str
     actor_login: str | None  # nullable: system events carry no actor
@@ -41,11 +50,15 @@ class Event(pydantic.BaseModel):
 
 
 class EventType(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid")
+
     name: str
     description: str | None
 
 
 class Actor(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid")
+
     login: str
     display_name: str | None
     followers: int

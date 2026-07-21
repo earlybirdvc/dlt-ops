@@ -72,18 +72,28 @@ def checkpoints():
     default=DEFAULT_CHECKPOINT_TABLE,
     help="Checkpoint table name",
 )
-def cleanup(pipeline, resource, table):
-    """Clean up checkpoints for a pipeline or resource.
+@click.option(
+    "--include-active",
+    is_flag=True,
+    help="Also delete active rows — live resume state. Affected resources restart at their window start.",
+)
+def cleanup(pipeline, resource, table, include_active):
+    """Delete completed checkpoints for a pipeline or resource.
+
+    Active rows are live resume state and are kept unless --include-active is
+    passed; deleting one restarts that resource at its window start.
 
     Examples:
         dlt-ops checkpoints cleanup --pipeline my_api_pipeline
         dlt-ops checkpoints cleanup --pipeline my_api_pipeline --resource orders
+        dlt-ops checkpoints cleanup --pipeline my_api_pipeline --include-active
     """
     try:
         cleanup_checkpoints(
             pipeline_name=pipeline,
             resource_name=resource,
             checkpoint_table=table,
+            include_active=include_active,
         )
 
         target = f"pipeline '{pipeline}'"

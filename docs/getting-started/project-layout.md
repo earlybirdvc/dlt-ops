@@ -98,7 +98,7 @@ Two more opinions are enforced without you writing anything:
 
 ## Overrides — and their limit
 
-**Every `validate` rule can be switched off per project (`[dlt_ops.rules]`) or exempted per source with a mandatory written reason (`[sources.<X>.dlt_ops.rule_exemptions]`) — the [rules reference](../configuration/rules.md) covers the knobs.** Know the limit: the switches silence findings, they do not teach discovery a different layout. A source module outside `<pipeline>/source/`, or without a `@dlt.source`-decorated function, is not found no matter which rules you disable — conventions 1, 2, and the decorator itself are structural, not advisory.
+**Every `validate` rule can be switched off per project (`[dlt_ops.rules]`) or exempted per source with a mandatory written reason (`[sources.<X>.dlt_ops.rule_exemptions]`) — the [rules reference](../configuration/rules.md) covers the knobs.** Know the limits. The switches silence findings; they do not teach discovery a different layout. And `import_safety` takes no per-source exemption at all: naming it under a source's `rule_exemptions` is a config error that fails `validate`, because that rule decides whether the module is imported into the process, which is not a per-source decision. Its project-wide `[dlt_ops.rules] import_safety = false` switch is the only opt-out. A source module outside `<pipeline>/source/`, or without a `@dlt.source`-decorated function, is not found no matter which rules you disable — conventions 1, 2, and the decorator itself are structural, not advisory.
 
 ## The project marker
 

@@ -4,7 +4,9 @@ description: Task guide — take a destination from core tier to full tier by im
 
 # Write a destination adapter
 
-This guide takes a destination from core tier to full tier: you implement the `DestinationAdapter` Protocol, ship it as an entry point in your own distribution, and watch the same project go from "runs ledger skipped" to a queryable `_dlt_ops_runs` table — without touching `dlt-ops` itself. You need this when your warehouse has no first-party adapter (only DuckDB, Postgres, and BigQuery ship one) and you want the six adapter-gated features against it; read [destinations and capability tiers](../concepts/destinations-and-tiers.md) first for why the boundary is shaped this way.
+**Try `register_derived_adapter` first.** dlt publishes, per destination, most of what an adapter needs, so for any destination declaring a `sqlglot_dialect` a whole working adapter can be built from that alone — one call, no code. Hand-writing one is what you do when a **driver** fact differs from what its dialect implies: a paramstyle the dialect does not write, a `NULL` the driver refuses to bind, an `information_schema` scoped per dataset instead of globally, or a schema that infrastructure rather than the adapter owns. Start at [reaching full tier](../reference/destinations.md#reaching-full-tier) — if a derived adapter covers your destination, you are done, and you should read what derivation does and does not prove before relying on it.
+
+This guide is the other path: you implement the `DestinationAdapter` Protocol, ship it as an entry point in your own distribution, and watch the same project go from "runs ledger skipped" to a queryable `_dlt_ops_runs` table — without touching `dlt-ops` itself. Read [destinations and capability tiers](../concepts/destinations-and-tiers.md) first for why the boundary is shaped this way.
 
 **Prerequisites**
 
@@ -28,16 +30,15 @@ The [contract](#the-contract) is the `DestinationAdapter` Protocol surface; the 
 
 - **Callers hand you canonical SQL** in the DuckDB dialect with positional `?` placeholders, plus the parameters. Your adapter owns the whole translation: transpile to the native dialect, convert placeholders to the native style, execute through the live dlt `sql_client` the caller passes in. Parameter values never enter the SQL text — swap placeholders as sqlglot AST nodes, bind values natively. (The one sanctioned exception is typed, not textual: a driver that cannot bind some value — BigQuery rejects a bound `None` — may inline it as an AST literal.)
 - **Adapters never construct credentials or clients.** Callers own pipeline attachment and hand a live client in; your class is stateless dialect knowledge.
-- **Fragments are canonical too.** `timestamp_now_sql` and `timestamp_sub_days_sql(days)` exist because sqlglot transpiles syntax, not every function idiom — each adapter owns the idioms it guarantees survive its own transpile step, and the first-party ones are snapshot-locked in `tests/test_destinations.py`.
+- **Fragments are canonical too.** `timestamp_now_sql` and `timestamp_sub_days_sql(days)` are written in the canonical dialect, not the native one, because sqlglot transpiles syntax rather than every function idiom. They are shared defaults — `CURRENT_TIMESTAMP` and `<now> - INTERVAL 'N days'` — that every first-party adapter inherits unchanged and that are snapshot-locked per adapter in `tests/test_destinations.py`. Declare your own only if transpilation does not produce a spelling your destination accepts.
 
 The full member surface — the Tier-2 preflight probes every one of these, attributes included, so a missing member fails runs targeting your destination:
 
 | Member | Contract |
 |---|---|
-| `name: str` | Registry key. Must equal the engine name dlt reports (`Destination.to_name(destination_type)`) and your entry-point name; for the first-party adapters it doubles as the sqlglot dialect name. |
-| `placeholder_style: "%s" \| "?" \| "$1"` | The destination's native positional placeholder. Informational for diagnostics — conversion happens inside `execute_sql` / `execute_query`, never in caller code. |
+| `name: str` | Registry key, and nothing more. Must equal the engine name dlt reports (`Destination.to_name(destination_type)`) and your entry-point name. It is deliberately **not** the transpile target: which dialect you write is your adapter's own business and stays out of the port. |
+| `placeholder_style: str` | The native positional placeholder token of your destination's dlt `sql_client`, as a plain string. The contract is only that the token is what your client binds against — the Protocol enumerates no closed set, so a driver wanting `:1` or `%(name)s` conforms like any other. Informational for diagnostics; conversion happens inside `execute_sql` / `execute_query`, never in caller code. |
 | `supports_if_exists: bool` | `CREATE TABLE IF NOT EXISTS` / `DROP TABLE IF EXISTS` are valid DDL; `drop_table_if_exists` falls back to probe-then-drop when False. |
-| `supports_alter_add_column_if_not_exists: bool` | `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` is valid; when False, callers probe `fetch_columns` before altering. |
 | `supports_create_schema_if_not_exists: bool` | The adapter may create the schema/dataset via `ensure_schema`; when False, `ensure_schema` must be a no-op (BigQuery's choice: dataset creation is owned by dlt/infra). |
 | `timestamp_now_sql: str` | Canonical-dialect fragment for "now" that survives your transpile. |
 | `timestamp_sub_days_sql(days) -> str` | Canonical-dialect fragment for "now minus N days" — interval arithmetic is the idiom sqlglot most often mistranslates. |
@@ -201,10 +202,9 @@ class QuackDBAdapter:
     conversion from canonical ``?`` happens inside ``execute_*`` below."""
 
     # Capability flags: which DDL shapes are safe to emit against this engine.
-    # Callers branch on these instead of guessing (checkpoint DDL, the
-    # run_id column migration, schema creation).
+    # Callers branch on these instead of guessing (checkpoint DDL, schema
+    # creation).
     supports_if_exists = True
-    supports_alter_add_column_if_not_exists = True
     supports_create_schema_if_not_exists = True
 
     # Fragments, written in the CANONICAL dialect: sqlglot transpiles syntax,
@@ -388,7 +388,7 @@ Source: demo_events  |  Findings: 0  |  Duration: 0.33s
 
 ## 5. Runtime registration, where an install isn't feasible
 
-**`dlt_ops.register` is the entry point's runtime twin — it feeds the same process-wide registry, so `get`/lookup behavior is identical.** It only exists in the process that executed it: the CLI is a separate process, so shipping an adapter to the toolchain always means the entry point. The runtime form is for pytest fixtures, notebooks, and scripts that drive the Python API in-process. MotherDuck is DuckDB-hosted, so upgrading it in a session is one subclass:
+**`dlt_ops.register` is the entry point's runtime twin — it feeds the same process-wide registry, so `get`/lookup behavior is identical.** It only exists in the process that executed it: the CLI is a separate process, so shipping an adapter to the toolchain always means the entry point. The runtime form is for pytest fixtures, notebooks, and scripts that drive the Python API in-process. `register_derived_adapter("motherduck")` is the shortest version of this — same registry, same tier, nothing to subclass — and the explicit form below is what you write when your adapter must override a driver fact the derivation cannot see. MotherDuck is DuckDB-hosted, so upgrading it in a session is one subclass either way:
 
 ```python
 import dlt_ops

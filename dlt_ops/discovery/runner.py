@@ -8,9 +8,18 @@ and 12 (``TimeIntervalContext`` injection around every run), stamps the
 configured load-timestamp column, wires configured pre-load assertions
 (streaming gate per resource + the staged ``extract → finalize →
 flush-quarantine → normalize → load`` split), records the run in the
-``_dlt_ops_runs`` ledger (start row before extract, terminal row on
-completion/failure), and persists the run trace to the same resolved
-destination + dataset (both best effort).
+``_dlt_ops_runs`` ledger (start row as soon as destination + dataset resolve,
+terminal row on completion/failure), and persists the run trace to the same
+resolved destination + dataset (both best effort).
+
+The ledger opens before source instantiation, not before extract, because setup
+is where the failures worth recording live: an unresolvable secret raises inside
+``source_fn()`` while dlt's own ``_dlt_loads`` — written at ``complete_load`` —
+still holds nothing. Everything after the start row runs inside one try, so
+every exit writes a terminal row and no run is left reading as still running.
+Failures BEFORE the destination resolves cannot be recorded at all (the ledger
+lives in that destination); those raise ``ProjectConfigError`` subclasses the
+CLI turns into a red one-line exit.
 
 Runs are destination-tiered: a destination with no registered
 ``DestinationAdapter`` executes the same loop in core mode — one WARNING at
@@ -43,7 +52,7 @@ from dlt_ops.config import (
     resolve_destination,
 )
 from dlt_ops.destinations import core_mode_notice, has_adapter
-from dlt_ops.discovery.models import SourceInfo
+from dlt_ops.discovery.models import SourceInfo, resolve_load_timestamp_column
 from dlt_ops.preflight import run_preflight
 from dlt_ops.runs.writer import (
     RunStatus,
@@ -60,8 +69,24 @@ logger = logging.getLogger(__name__)
 LOG_SEPARATOR = "=" * 60
 
 # Destinations whose runs count as the local dev loop and get _LOCAL_DEFAULTS.
-# DuckDB is the sanctioned universal dev-loop destination;
-# orchestrated destinations keep the values from .dlt/config.toml.
+# DuckDB is the sanctioned universal dev-loop destination; orchestrated
+# destinations keep the values from .dlt/config.toml.
+#
+# A per-provider constant, and the package's rule says those belong in config or
+# capabilities. Neither takes it today, and the reasons are worth recording so
+# the shortcuts don't get re-proposed:
+#
+# - Not a capability. dlt publishes nothing to derive it from, and the two
+#   destinations that most need to differ are indistinguishable: motherduck's
+#   DestinationCapabilitiesContext is boolean-identical to duckdb's while being
+#   a cloud warehouse. Putting it on DestinationAdapter would also make worker
+#   tuning depend on adapter REGISTRATION (core-mode duckdb would lose its
+#   defaults) and would break every third-party adapter, since the Tier-2
+#   preflight fails an adapter missing any Protocol member and the authoring
+#   guide tells third parties to implement the Protocol structurally rather
+#   than inherit SqlAdapterBase.
+# - Config is the right home, but the key has to be declared in
+#   config._KNOWN_PROJECT_KEYS or validate reports it as a typo.
 _LOCAL_DESTINATIONS = frozenset({"duckdb"})
 
 _LOCAL_DEFAULTS = {
@@ -116,14 +141,33 @@ def _validate_resources(source: Any, resources: tuple[str, ...]) -> None:
 
 
 def _apply_canonical_schema_contract(source_instance: Any) -> None:
-    """Rule 10 runtime half: undeclared resources get the canonical contract.
+    """Rule 10 runtime half: supply the canonical contract where dlt derives none.
 
-    A resource that declares its own ``schema_contract`` is left untouched.
+    ``schema_contract is None`` is exactly the set of resources dlt left without
+    one: a dict/list ``columns=`` hint, or no ``columns=`` at all. A Pydantic
+    ``columns=`` model never lands here — dlt derives the contract from the
+    model's ``extra`` at decoration time, so for those resources the model is
+    the declaration and the ``pydantic_model_forbids_extra`` rule is what keeps
+    that derivation canonical. Re-applying the literal here would silently
+    overrule an author's declared ``extra``, including an opted-in
+    ``extra="allow"``.
+
+    The two paths are not interchangeable, and the difference is load-bearing.
+    Applied here, the contract is enforced at normalize time, where dlt grants a
+    brand-new table one free pass (``Schema.apply_schema_contract`` forces
+    ``column_mode="evolve"`` while the table does not exist yet): the first run
+    defines the schema and every later unknown column hard-fails. A model's
+    ``extra="forbid"`` is enforced earlier, in the extract step, so it rejects an
+    unknown column even on the very first run.
     """
     for name, resource in source_instance.selected_resources.items():
         if resource.schema_contract is None:
             resource.apply_hints(schema_contract=dict(CANONICAL_SCHEMA_CONTRACT))
             logger.info(f"Applied canonical schema contract to resource {name!r}")
+        else:
+            # The contract a resource actually runs under, in the run log:
+            # a `discard_value` line here is silent column loss, visible.
+            logger.info(f"Resource {name!r} declares schema contract {resource.schema_contract}")
 
 
 def _make_row_stamper(column: str, stamp: datetime) -> Any:
@@ -154,14 +198,19 @@ def _apply_load_timestamp(source_instance: Any, load_timestamp_column: Any) -> N
     """Stamp UTC-now on every row when ``[dlt_ops] load_timestamp_column`` is set.
 
     One timestamp per run (captured here) so every row of the run carries the
-    same value. Unset / empty / non-string = off, nothing stamped.
+    same value. Normalized through the one reader
+    (``discovery.models.resolve_load_timestamp_column``) so the column stamped
+    here is byte-for-byte the one the reconciler ignores and the
+    ``cursor_not_load_timestamp`` rule guards. Unset / blank / non-string =
+    off, nothing stamped.
     """
-    if not (isinstance(load_timestamp_column, str) and load_timestamp_column.strip()):
+    column = resolve_load_timestamp_column(load_timestamp_column)
+    if column is None:
         return
     stamp = datetime.now(UTC)
     for resource in source_instance.selected_resources.values():
-        resource.add_step(_LoadTimestampStamper(_make_row_stamper(load_timestamp_column, stamp)))
-    logger.info(f"Stamping load timestamp column {load_timestamp_column!r} on every row")
+        resource.add_step(_LoadTimestampStamper(_make_row_stamper(column, stamp)))
+    logger.info(f"Stamping load timestamp column {column!r} on every row")
 
 
 def _assertion_abort(exc: BaseException) -> BaseException | None:
@@ -286,63 +335,15 @@ def run_pipeline(
     resolved_dataset = dataset_name or resolve_dataset(source.config, project_config)
     logger.info(f"Destination: {resolved_destination}, dataset: {resolved_dataset}")
 
-    source_instance = source.source_fn()
-    if resources:
-        _validate_resources(source_instance, resources)
-        source_instance = source_instance.with_resources(*resources)
-        logger.info(f"Running resources: {list(resources)}")
-    else:
-        logger.info(f"Running all resources: {list(source_instance.resources.keys())}")
-
-    run_preflight(
-        destination=resolved_destination,
-        project_config=project_config,
-        source=source_instance,
-        bounds=bounds,
-        raw_config=raw_config,
-        source_section=source.name,
-        uses_checkpoints=source.uses_checkpoints,
-    )
-    # Core mode is loud by contract: nothing is wrong, but every degradation
-    # announces itself — one WARNING naming the dark features at run start.
-    if not has_adapter(resolved_destination):
-        logger.warning(
-            f"{core_mode_notice(resolved_destination)}; "
-            "extract/load, fail/warn assertions, and trace persistence run normally"
-        )
-
-    # Assertion engine construction re-runs the cheap static checks and
-    # imports custom predicates — a bad config hard-fails here, next to the
-    # preflight, before any pipeline is constructed (Tier-2 defense in depth,
-    # assertions spec §7). The gate steps land after the load-timestamp
-    # stamper by placement_affinity, so assertions observe the final row shape.
-    assertion_engine = AssertionEngine.from_config(
-        source_section=source.name,
-        raw_config=raw_config,
-        source_instance=source_instance,
-        project_root=root,
-    )
-    assertion_engine.attach(source_instance)
-
-    apply_dlt_overrides(
-        normalize_workers=normalize_workers,
-        load_workers=load_workers,
-        file_max_items=file_max_items,
-        is_local=resolved_destination in _LOCAL_DESTINATIONS,
-    )
-
-    pipeline = dlt.pipeline(
-        pipeline_name=pipeline_name_for_source(source.name),
-        destination=resolved_destination,
-        dataset_name=resolved_dataset,
-        dev_mode=False,
-        progress="log",
-    )
-    logger.info(f"Pipeline working directory: {pipeline.working_dir}")
-
-    _apply_canonical_schema_contract(source_instance)
-    _apply_load_timestamp(source_instance, project_config.raw.get("load_timestamp_column"))
-
+    # The ledger opens here, at the first instant a run is recordable at all:
+    # the row lives in the run's own resolved destination + dataset, so nothing
+    # above this line has anywhere to write to. Everything below is inside the
+    # try, because setup is where the failures the ledger exists to expose
+    # happen — an unresolvable secret raises in source_fn() before a single
+    # resource exists, and dlt's own _dlt_loads records nothing until
+    # complete_load. Writing this early does mean a run that never clears
+    # preflight still lands a row; that is the intended reading. It failed, it
+    # is a run, and `pipeline status` should say so.
     runs_writer = RunsWriter(
         destination=resolved_destination,
         dataset=resolved_dataset,
@@ -354,17 +355,75 @@ def run_pipeline(
     )
     runs_writer.write_start()
 
-    # Rule 12 runtime half: every run executes under an injected
-    # TimeIntervalContext, so incremental resources honor run-window bounds
-    # without source authors writing allow_external_schedulers. The True
-    # override applies only when an interval actually exists (explicit bounds,
-    # DLT_INTERVAL_* env, or an orchestrator context): dlt raises
-    # ExternalSchedulerNotAvailable at bind when the flag is forced with no
-    # interval to join, which would fail every plain local run.
-    interval_ctx = TimeIntervalContext(interval=bounds, allow_external_schedulers=True)
-    if interval_ctx.interval is None:
-        interval_ctx = TimeIntervalContext()
+    pipeline: dlt.Pipeline | None = None
     try:
+        source_instance = source.source_fn()
+        if resources:
+            _validate_resources(source_instance, resources)
+            source_instance = source_instance.with_resources(*resources)
+            logger.info(f"Running resources: {list(resources)}")
+        else:
+            logger.info(f"Running all resources: {list(source_instance.resources.keys())}")
+
+        run_preflight(
+            destination=resolved_destination,
+            project_config=project_config,
+            source=source_instance,
+            bounds=bounds,
+            raw_config=raw_config,
+            source_section=source.name,
+            uses_checkpoints=source.uses_checkpoints,
+        )
+        # Core mode is loud by contract: nothing is wrong, but every degradation
+        # announces itself — one WARNING naming the dark features at run start.
+        if not has_adapter(resolved_destination):
+            logger.warning(
+                f"{core_mode_notice(resolved_destination)}; "
+                "extract/load, fail/warn assertions, and trace persistence run normally"
+            )
+
+        # Assertion engine construction re-runs the cheap static checks and
+        # imports custom predicates — a bad config hard-fails here, next to the
+        # preflight, before any pipeline is constructed (Tier-2 defense in depth,
+        # assertions spec §7). The gate steps land after the load-timestamp
+        # stamper by placement_affinity, so assertions observe the final row shape.
+        assertion_engine = AssertionEngine.from_config(
+            source_section=source.name,
+            raw_config=raw_config,
+            source_instance=source_instance,
+            project_root=root,
+        )
+        assertion_engine.attach(source_instance)
+
+        apply_dlt_overrides(
+            normalize_workers=normalize_workers,
+            load_workers=load_workers,
+            file_max_items=file_max_items,
+            is_local=resolved_destination in _LOCAL_DESTINATIONS,
+        )
+
+        pipeline = dlt.pipeline(
+            pipeline_name=pipeline_name_for_source(source.name),
+            destination=resolved_destination,
+            dataset_name=resolved_dataset,
+            dev_mode=False,
+            progress="log",
+        )
+        logger.info(f"Pipeline working directory: {pipeline.working_dir}")
+
+        _apply_canonical_schema_contract(source_instance)
+        _apply_load_timestamp(source_instance, project_config.raw.get("load_timestamp_column"))
+
+        # Rule 12 runtime half: every run executes under an injected
+        # TimeIntervalContext, so incremental resources honor run-window bounds
+        # without source authors writing allow_external_schedulers. The True
+        # override applies only when an interval actually exists (explicit bounds,
+        # DLT_INTERVAL_* env, or an orchestrator context): dlt raises
+        # ExternalSchedulerNotAvailable at bind when the flag is forced with no
+        # interval to join, which would fail every plain local run.
+        interval_ctx = TimeIntervalContext(interval=bounds, allow_external_schedulers=True)
+        if interval_ctx.interval is None:
+            interval_ctx = TimeIntervalContext()
         with Container().injectable_context(interval_ctx):
             if assertion_engine.active:
                 # Staged split (assertions spec §3): batch verdicts only exist
@@ -378,12 +437,19 @@ def run_pipeline(
                 load_info = pipeline.load()
             else:
                 load_info = pipeline.run(source_instance)
-    except Exception as exc:
+    # BaseException, not Exception: _validate_resources exits via SystemExit and
+    # an operator can Ctrl-C mid-load. Either would otherwise strand the start
+    # row at "running", which reads as a run still in flight — the one lie this
+    # ledger must not tell.
+    except BaseException as exc:
         abort = _assertion_abort(exc)
         if abort is not None:
             # CRITICAL failure hygiene: without the drop, the next run
-            # auto-loads the rejected batch (spec §3).
-            _drop_pending_packages(pipeline)
+            # auto-loads the rejected batch (spec §3). An assertion can only
+            # abort once a pipeline exists, but the guard keeps the failure
+            # path total.
+            if pipeline is not None:
+                _drop_pending_packages(pipeline)
             runs_writer.write_end(status=RunStatus.FAILED, error_summary=summarize_error(abort))
             if abort is exc:
                 raise

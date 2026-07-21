@@ -51,7 +51,7 @@ github_events_full @daily
 Error: --source/-s required in non-interactive mode (--yes)
 ```
 
-The exit code is the trigger's failure signal (above), and the [failure-semantics contract](../concepts/failure-semantics.md) defines exactly what fails a run — a preflight refusal, a tripped `fail` assertion, dlt's own load error. Every run that gets past preflight also lands in the [runs ledger](../concepts/runs-ledger.md) destination-side, failed outcomes with a one-line error summary — so a red cron mail and `pipeline status` tell one story (a preflight refusal aborts before the ledger's start row and shows up only in the trigger's log). Two more facts to settle before the first scheduled run:
+The exit code is the trigger's failure signal (above), and the [failure-semantics contract](../concepts/failure-semantics.md) defines exactly what fails a run — a preflight refusal, a tripped `fail` assertion, dlt's own load error. Every run whose destination and dataset resolve also lands in the [runs ledger](../concepts/runs-ledger.md) destination-side, failed outcomes with a one-line error summary — so a red cron mail and `pipeline status` tell one story, preflight refusals included. The exception is a run that cannot resolve its destination or dataset at all: the ledger row lives in that destination, so such a run shows up only in the trigger's log. Two more facts to settle before the first scheduled run:
 
 - **Overlap control belongs to the trigger.** `dlt-ops` is a CLI, not a resident scheduler: nothing serializes two simultaneous `run`s of the same source (`backfill` is the one verb with cross-invocation coordination, via [chunk claims](../concepts/backfill.md)). Schedule with headroom and make the trigger queue rather than stack — the workflow below does it with a `concurrency` group.
 - **`--root` replaces `cd`.** Every command takes the project root explicitly (`dlt-ops --root /opt/ingest/shop pipeline run -s orders -y`), which reads better in a crontab than a `cd &&` chain.
@@ -72,6 +72,8 @@ A daily source is then one crontab line — shown as config, since this page can
 - **A secret-backend plugin.** The `secret_backend` [plugin axis](../concepts/plugins.md) fetches secrets at run start and writes them into `dlt.secrets` — the Airflow Variable backend is the shipped example, and a vault or cloud secret manager plugs into the same axis.
 
 The scaffolded example and `examples/basic_project` need none of this — fixture-backed, local DuckDB, zero credentials — which is why every transcript on this page runs without a secret in sight.
+
+Which of those doors actually wins is dlt's provider ordering, and it is worth knowing before you pick one: a `.dlt/secrets.toml` present in the working directory outranks Google Secret Manager, AWS Secrets Manager, and any provider you register yourself. [Production readiness](production-readiness.md) has the full chain, the Docker and Kubernetes file-secret paths, the Airflow Variables story, and dlt's telemetry setting — the two things worth deciding on purpose before this goes to production.
 
 ### State: what survives a fresh runner
 
@@ -226,6 +228,9 @@ jobs:
       - run: uv tool install "dlt-ops[postgres]" # pick the extra your destination needs
 
       # Credential-free by design: validate never opens the destination.
+      # Plain validate is the pass/fail gate. Warnings — orphan config
+      # sections, staleness, core-tier notices — are filtered out of this
+      # form entirely; add --strict to a separate step to see or enforce them.
       - run: dlt-ops pipeline validate
 
       - run: dlt-ops pipeline run -s "${{ matrix.source }}" -y

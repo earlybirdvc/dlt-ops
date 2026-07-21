@@ -1,6 +1,6 @@
 # Docs site — Material for MkDocs. Build: uv run --group docs mkdocs build --strict
 site_name: dlt-ops
-site_description: An opinionated project layout and toolchain for dlt pipelines — discovery, validation, scheduling metadata, checkpoints, backfill, run ledger, drift detection, and pre-load assertions.
+site_description: A ready-made structure, toolchain, and set of guides for running many dlt sources in production — an enforced layout, discovery, validation, scheduling metadata, checkpoints, backfill, run ledger, drift detection, and pre-load assertions.
 site_url: https://earlybirdvc.github.io/dlt-ops/
 repo_url: https://github.com/earlybirdvc/dlt-ops
 repo_name: earlybirdvc/dlt-ops
@@ -55,7 +55,7 @@ plugins:
             separate_signature: true
             show_signature_annotations: true
   - llmstxt:
-      markdown_description: Opinionated production layer for dlt pipelines — discovery, validation, scheduling metadata, checkpoints, backfill, runs ledger, schema-drift reconciliation, and pre-load assertions.
+      markdown_description: A ready-made structure, toolchain, and set of guides for running many dlt sources in production — an enforced layout, discovery, validation, scheduling metadata, checkpoints, backfill, runs ledger, schema-drift reconciliation, and pre-load assertions.
       full_output: llms-full.txt
       sections:
         Getting started:
@@ -148,6 +148,7 @@ nav:
       - guides/cleanup.md
       - guides/drift-detection.md
       - guides/deployment.md
+      - guides/production-readiness.md
       - guides/airflow.md
       - guides/dagster.md
       - guides/prefect.md

@@ -15,11 +15,15 @@ Chunk claiming is the locked optimistic compare-and-swap on ``status``:
     WHERE backfill_id = ? AND chunk_id = ? AND status IN ('pending','failed')
 
 The adapter boundary exposes no rows-affected count, so the CAS outcome is
-read back: after the UPDATE the worker re-selects the chunk and wins iff
-``claimed_by`` is its own token. Losing — including an update conflict on
-destinations with optimistic transaction semantics — is silent: another
-worker owns the chunk, move on. No in-process locks; concurrent invocations
-on the same source coordinate exclusively via this table.
+read back from the row itself — the only trustworthy arbiter. After the
+UPDATE the worker re-selects the chunk and the row state decides between the
+three real outcomes: its own token holds the row (won), another worker's
+token holds it (lost — non-fatal, move on), or the row is still inside the
+CAS target set (``pending`` / ``failed``), meaning the UPDATE never applied.
+The last one is a destination failure, not a race, and it raises: reporting an
+unclaimed chunk as "someone else has it" would skip that time window while
+exiting clean. No in-process locks; concurrent invocations on the same source
+coordinate exclusively via this table.
 
 Unlike the best-effort runs ledger, state writes here are load-bearing
 (exactly-once chunk execution) and raise on failure.
@@ -287,9 +291,26 @@ class BackfillState:
 
         The claim targets ``status IN ('pending','failed')`` so a resume
         retries failed chunks and skips completed ones by construction. The
-        outcome is verified by reading ``claimed_by`` back; a conflicting
-        concurrent UPDATE (raised by destinations with optimistic transaction
-        semantics) counts as a lost claim, never an error.
+        adapter boundary exposes no rows-affected count, so the verify SELECT
+        classifies the row into the three outcomes the CAS actually has:
+
+        - this worker's token holds a ``claimed`` row — won (True);
+        - another worker's token holds the row — lost the race (False), the
+          documented non-fatal outcome;
+        - the row is still ``pending`` / ``failed``, i.e. still inside the CAS
+          target set — the UPDATE never applied, so *nobody* claimed this
+          chunk. That is a destination failure, not a race, and it raises.
+
+        A raising UPDATE is classified by the same rule rather than assumed to
+        be a race. Destinations with optimistic transaction semantics surface a
+        genuine concurrency conflict as an exception, and no portable exception
+        taxonomy separates that from a rate limit, a dropped connection, or a
+        permission error — so the exception is tolerated only when the row
+        independently shows another worker holding the chunk. Anything else
+        re-raises: swallowing it would silently skip that time window.
+
+        Raises:
+            BackfillStateError: the CAS did not apply, or the chunk row is gone.
         """
         adapter, table_ref = self._boundary()
         cas_sql = (
@@ -297,16 +318,41 @@ class BackfillState:
             f"SET status = '{ChunkStatus.CLAIMED}', claimed_by = ?, claimed_at = {adapter.timestamp_now_sql} "
             f"WHERE backfill_id = ? AND chunk_id = ? AND status IN ('{ChunkStatus.PENDING}', '{ChunkStatus.FAILED}')"
         )
+        cas_error: Exception | None = None
         try:
             with open_client(self._pipeline) as client:
                 adapter.execute_sql(client, cas_sql, claimed_by, backfill_id, chunk_id)
         except Exception as exc:
-            logger.warning(f"Chunk {chunk_id} claim update conflicted (another worker likely won): {exc}")
+            cas_error = exc
+
         verify_sql = f"SELECT claimed_by, status FROM {table_ref} WHERE backfill_id = ? AND chunk_id = ?"
         with open_client(self._pipeline) as client:
             cursor = adapter.execute_query(client, verify_sql, backfill_id, chunk_id)
         row = cursor.fetchone()
-        return row is not None and str(row[0]) == claimed_by and str(row[1]) == ChunkStatus.CLAIMED
+        if row is None:
+            raise BackfillStateError(
+                f"chunk {chunk_id} of backfill {backfill_id} is missing from {BACKFILLS_TABLE} while claiming it; "
+                f"the chunk plan was seeded before this claim, so its row cannot legitimately be absent"
+            ) from cas_error
+
+        holder = None if row[0] is None else str(row[0])
+        status = str(row[1])
+        if holder == claimed_by and status == ChunkStatus.CLAIMED:
+            if cas_error is not None:
+                logger.warning(
+                    f"Chunk {chunk_id} claim UPDATE raised ({cas_error}) but the row is claimed by "
+                    f"{claimed_by!r} — the write landed; proceeding"
+                )
+            return True
+        if status in (ChunkStatus.PENDING, ChunkStatus.FAILED):
+            reason = f": {cas_error}" if cas_error is not None else " (the destination reported no error)"
+            raise BackfillStateError(
+                f"chunk {chunk_id} of backfill {backfill_id} is still {status!r} after its claim UPDATE — "
+                f"the compare-and-swap never applied, so no worker holds this chunk and its time window "
+                f"would go unbackfilled. This is a destination failure, not a lost claim{reason}"
+            ) from cas_error
+        logger.info(f"Chunk {chunk_id} is held by {holder!r} (status {status!r}); this worker moves on")
+        return False
 
     def _transition(self, backfill_id: str, chunk_id: str, claimed_by: str, set_clause: str, *params: Any) -> None:
         """Status transition scoped to the claiming worker's own chunk row."""

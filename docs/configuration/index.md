@@ -18,7 +18,7 @@ description: The dlt-ops configuration model — the [dlt_ops] project table and
 
 **The top-level `[dlt_ops]` table is the project marker: a directory is a `dlt-ops` project iff `.dlt/config.toml` exists, parses, and contains a `[dlt_ops]` table.** Commands walk up from the current directory until a directory qualifies, or take an explicit `--root`.
 
-The check fails loudly rather than guessing: a broken `config.toml` raises a parse error instead of silently widening the search to a parent, and a directory with no `[dlt_ops]` table is reported as "not a project" with a `dlt-ops init` hint. TOML is canonical — there are no environment-variable overrides and no decorator-level config on top of dlt's own `@dlt.source` / `@dlt.resource`; if a setting exists, it is a key in this file.
+The check fails loudly rather than guessing: a broken `config.toml` raises a parse error instead of silently widening the search to a parent, and a directory with no `[dlt_ops]` table is reported as "not a project" with a `dlt-ops init` hint. TOML is canonical **for the `dlt_ops` namespace**: every `[dlt_ops]` and `[sources.<X>.dlt_ops]` key is parsed straight out of this file, with no environment-variable override and no decorator-level config on top of dlt's own `@dlt.source` / `@dlt.resource`. That scope is the honest one — dlt's own keys keep dlt's full provider chain, environment variables included, and credentials live in `secrets.toml`.
 
 ## Per-source settings: `[sources.<X>.dlt_ops]`
 
@@ -39,13 +39,30 @@ The `dlt_ops` prefix keeps every added key out of dlt's namespace and marks each
 - **Destination**: `[dlt_ops].default_destination` → `[sources.<X>.dlt_ops].destination`. No CLI override — the destination always comes from config.
 - **Dataset**: `[dlt_ops].default_dataset` → `[sources.<X>.dlt_ops].dataset` → an explicit `--dataset` on `run` / `clean`.
 
-Rules resolve on a parallel ladder: each rule's registered default (on for every shipped rule) → the `[dlt_ops.rules]` project-wide on/off knob → a `[sources.<X>.dlt_ops.rule_exemptions]` entry that suppresses one rule's findings for one source (the rule still runs everywhere else). See the [rules reference](rules.md) for the catalog and the [config reference](reference.md#resolution-precedence) for the canonical ladders.
+Rules resolve on a parallel ladder: each rule's registered default (on for every shipped rule except `incremental_cursor_required`, which ships off) → the `[dlt_ops.rules]` project-wide on/off knob → a `[sources.<X>.dlt_ops.rule_exemptions]` entry that suppresses one rule's findings for one source (the rule still runs everywhere else). See the [rules reference](rules.md) for the catalog and the [config reference](reference.md#resolution-precedence) for the canonical ladders.
 
 ## Secrets: config.toml vs secrets.toml
 
 **`dlt-ops` adds no secret file of its own — it splits along dlt's existing line: credentials in `.dlt/secrets.toml`, non-secret settings in `.dlt/config.toml`.** Destination credentials and source API keys go in `secrets.toml` per [dlt's conventions](https://dlthub.com/docs/general-usage/credentials/setup), and alert-sink secrets (for example a Sentry DSN) under `[alert_sinks.<name>]`; non-secret alert-sink constructor options stay in `config.toml` under `[dlt_ops.alert_sink.<name>]`.
 
 Secret **backends** such as Airflow Variables are plugins that fetch values at runtime and write them into `dlt.secrets`, so the secret itself never lands in either file — see [plugins](../concepts/plugins.md).
+
+## What `run` writes into the environment
+
+**Three dlt-native settings are passed to dlt as environment variables rather than through config, because that is how a per-invocation override reaches dlt.** Every `run` (and every backfill chunk) applies them before the pipeline is constructed:
+
+| CLI flag | Environment variable it sets | Local default when the flag is omitted |
+|---|---|---|
+| `-n` / `--normalize-workers` | `NORMALIZE__WORKERS` | `4` |
+| `-l` / `--load-workers` | `LOAD__WORKERS` | `3` |
+| `-f` / `--file-max-items` | `NORMALIZE__DATA_WRITER__FILE_MAX_ITEMS` | none |
+
+An explicit flag is written unconditionally and overrides whatever the environment already held. The defaults in the third column behave differently in two ways worth knowing. They apply **only when the resolved destination is DuckDB** — the local dev loop — so a run against Postgres, BigQuery, or anything else leaves all three variables untouched and dlt uses its own defaults or whatever your `.dlt/config.toml` and environment already say. And they are applied with `setdefault`, so an existing environment value wins: exporting `LOAD__WORKERS` in a container is not overwritten by the local default. `NORMALIZE__DATA_WRITER__FILE_MAX_ITEMS` has no local default at all; without `-f` it is never set.
+
+The keys are dlt's own, spelled dlt's way (sections joined by `__`, uppercased), so every other setting you would put in `[normalize]` or `[load]` in `.dlt/config.toml` still applies — this only pre-fills two of them for the credential-free dev loop.
+
+!!! warning "On DuckDB, the two local defaults win over `.dlt/config.toml`"
+    dlt resolves environment variables ahead of `config.toml`. Because the local defaults are written into the environment, a DuckDB run uses `normalize.workers = 4` and `load.workers = 3` even when your `.dlt/config.toml` sets those two keys to something else — an explicit `[normalize] workers = 9` resolves to 9 on any other destination and to 4 on DuckDB. The `setdefault` in the third column defers to a value already exported in the environment, not to one written in the file. To pin a different number for a DuckDB run, pass the flag (`-n 9`) or export the variable (`NORMALIZE__WORKERS=9`) rather than setting the config key. Every other `[normalize]` and `[load]` key is untouched, and so are all three variables on any non-DuckDB destination.
 
 ## Plugin disambiguation, installed at config load
 

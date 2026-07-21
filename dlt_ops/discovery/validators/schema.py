@@ -7,6 +7,7 @@ from typing import Any, get_args, get_origin
 import pydantic
 
 from dlt_ops.discovery.models import ValidationContext, ValidationError
+from dlt_ops.schema_contracts import discards_unknown_columns, effective_column_mode
 
 logger = logging.getLogger(__name__)
 
@@ -110,17 +111,13 @@ def _parse_resource_pydantic_model(
 
 
 def _get_column_hints(resource: Any) -> dict[str, dict[str, Any]]:
-    """Get column hints dict from resource.
+    """Column hints from a resource, already normalized by dlt.
 
-    Returns empty dict if columns is a Pydantic model type (apply_hints not yet called).
+    dlt's public `columns` property returns the normalized hint dict whatever
+    `columns=` was declared as — a Pydantic model is converted at decoration
+    time, so this never sees a model class.
     """
-    hints = getattr(resource, "_hints", {})
-    columns = hints.get("columns", {})
-
-    # Pydantic model type means apply_hints() hasn't merged additional hints yet
-    if isinstance(columns, type):
-        return {}
-
+    columns = getattr(resource, "columns", None)
     return columns if isinstance(columns, dict) else {}
 
 
@@ -338,5 +335,64 @@ def validate_resource_columns_hint(ctx: ValidationContext) -> list[ValidationErr
             )
             if error is not None:
                 errors.append(error)
+
+    return errors
+
+
+def _columns_model_name(resource: Any) -> str:
+    """Name of the Pydantic model behind `columns=`, or a generic stand-in.
+
+    dlt moves the declared model onto the resource's `PydanticValidator` step
+    (public `validator` property) and keeps only the normalized hint dict under
+    `columns`, so the validator is the one place the class itself survives.
+    """
+    model = getattr(getattr(resource, "validator", None), "original_model", None)
+    return getattr(model, "__name__", "the columns= model")
+
+
+def validate_pydantic_model_forbids_extra(ctx: ValidationContext) -> list[ValidationError]:
+    """Ensure a Pydantic columns= model never resolves to a discard_value contract.
+
+    dlt derives a resource's `schema_contract` from its `columns=` model:
+    `extra="forbid"` derives `columns: "freeze"`, `extra="allow"` derives
+    `"evolve"`, and leaving `extra` unset — Pydantic's default — derives
+    `"discard_value"`. Under `discard_value` an unknown field is stripped from
+    every row with no error, no warning, and no trace in the load package, so a
+    source that silently stops delivering a column looks exactly like a source
+    that never had one.
+
+    The check reads the contract dlt derived rather than re-deriving it, so it
+    cannot drift from upstream's mapping, and it passes a resource that reaches
+    a non-discarding contract any other way (an explicit canonical
+    `schema_contract=` literal overrides the model's `extra` in dlt).
+
+    Per-source opt-out: [sources.<X>.dlt_ops.rule_exemptions]
+    pydantic_model_forbids_extra = "<reason>".
+    """
+    errors: list[ValidationError] = []
+
+    for source in ctx.sources.values():
+        try:
+            source_instance = source.source_fn()
+        except Exception as e:
+            logger.debug(f"Could not instantiate source {source.name}: {e}")
+            continue
+
+        for resource_name, resource in source_instance.resources.items():
+            contract = getattr(resource, "schema_contract", None)
+            if not discards_unknown_columns(contract):
+                continue
+
+            model_name = _columns_model_name(resource)
+            errors.append(
+                ValidationError(
+                    source_name=source.name,
+                    field=f"resource.{resource_name}",
+                    message=f"resource '{resource_name}' runs under schema_contract "
+                    f"columns='{effective_column_mode(contract)}' — dlt drops unknown columns "
+                    f"silently instead of failing. Add this line to {model_name}: "
+                    f'model_config = pydantic.ConfigDict(extra="forbid")',
+                )
+            )
 
     return errors

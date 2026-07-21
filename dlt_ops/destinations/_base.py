@@ -2,20 +2,50 @@
 
 Internal — the public surface is the ``DestinationAdapter`` Protocol; third-party
 adapters are free to implement it without this base.
+
+The base is capability-derived: for every fact dlt publishes about a destination
+it reads dlt's own ``DestinationCapabilitiesContext`` (see ``_capabilities.py``)
+instead of asking each adapter to restate it. A subclass declares an attribute
+only to override the derived answer — which it must where the fact belongs to
+the *driver* rather than the dialect, because dlt publishes nothing about
+driver behaviour.
+
+Derivation never invents a dialect. A destination dlt cannot resolve, or one
+publishing no ``sqlglot_dialect``, falls back to the adapter's own ``name`` as
+the transpile target — the pre-derivation behaviour, which is correct for a
+third-party adapter whose engine name *is* its dialect and honest for everyone
+else, since a wrong dialect name fails loudly at ``sqlglot`` rather than
+silently transpiling into the wrong SQL.
 """
 
 from __future__ import annotations
 
+import operator
 import re
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar
 
 import sqlglot
 from dlt.destinations.exceptions import DatabaseUndefinedRelation
 from sqlglot import exp
 
-from dlt_ops.destinations.protocol import ColumnInfo, Cursor
+from dlt_ops.destinations._capabilities import derive_capabilities
+from dlt_ops.destinations.protocol import (
+    CANONICAL_IDENTIFIER_RE,
+    ColumnInfo,
+    Cursor,
+    render_canonical_identifier,
+    render_canonical_table_ref,
+)
 
 CANONICAL_DIALECT = "duckdb"
+
+CANONICAL_TIMESTAMP_NOW_SQL = "CURRENT_TIMESTAMP"
+"""Canonical "now" fragment, shared by every adapter.
+
+sqlglot's writers already carry each dialect's spelling of it (a parenthesized
+call, a vendor-specific function), so a per-adapter override would only restate
+what transpilation performs — snapshot-locked in the adapter tests.
+"""
 
 
 class _MaterializedCursor:
@@ -46,34 +76,104 @@ class _MaterializedCursor:
 class SqlAdapterBase:
     """Implements the DestinationAdapter boundary on top of a dlt ``sql_client``."""
 
-    name: ClassVar[str]
-    placeholder_style: ClassVar[Literal["%s", "?", "$1"]]
-    supports_if_exists: ClassVar[bool]
-    supports_alter_add_column_if_not_exists: ClassVar[bool]
-    supports_create_schema_if_not_exists: ClassVar[bool]
-    timestamp_now_sql: ClassVar[str]
-    _identifier_re: ClassVar[re.Pattern[str]]
-    # BigQuery's DB-API cannot type a bound NULL parameter; adapters that set
-    # this inline None params as NULL literals instead of binding them. Every
-    # other destination binds NULL natively, so the default keeps them untouched.
+    name: str
+    """dlt engine name; also the adapter's registry key."""
+
+    dialect: str = ""
+    """sqlglot dialect canonical SQL is transpiled into; derived when unset.
+
+    Separate from ``name`` because the two genuinely differ: engines can share
+    a dialect, and an engine's name is not always one sqlglot knows.
+    """
+
+    placeholder_style: str = "?"
+    """Positional placeholder token this adapter emits; derived when unset.
+
+    Derivation asks the dialect. A subclass must declare it when its driver's
+    paramstyle disagrees with its dialect's convention — that is a property of
+    the client library, which dlt's capabilities do not describe.
+    """
+
+    supports_if_exists: bool = True
+    """``IF (NOT) EXISTS`` is valid on table DDL; derived when unset."""
+
+    supports_create_schema_if_not_exists: bool = True
+    """The adapter may create the schema/dataset; not derived.
+
+    Whether schema creation is the adapter's to make is a deployment fact —
+    placement, access control, who owns the namespace — and dlt publishes no
+    capability for it.
+    """
+
+    timestamp_now_sql: str = CANONICAL_TIMESTAMP_NOW_SQL
+
+    # The shared default grammar; a subclass whose destination accepts less may
+    # tighten it, and render_identifier then validates against the tighter one.
+    _identifier_re: ClassVar[re.Pattern[str]] = CANONICAL_IDENTIFIER_RE
+    # Some DB-APIs cannot type a bound NULL parameter; adapters that set this
+    # inline None params as NULL literals instead of binding them. A driver
+    # fact, so it is declared rather than derived.
     inline_null_params: ClassVar[bool] = False
 
+    def __init__(self) -> None:
+        """Fill in every derivable fact this class did not declare itself."""
+        derived = derive_capabilities(self.name)
+        if not self._declares("dialect"):
+            self.dialect = derived.dialect if derived is not None else self.name
+        if not self._declares("placeholder_style"):
+            self.placeholder_style = derived.placeholder_style if derived is not None else "?"
+        if not self._declares("supports_if_exists") and derived is not None:
+            self.supports_if_exists = derived.supports_if_exists
+
+    @classmethod
+    def _declares(cls, attribute: str) -> bool:
+        """Whether a subclass sets ``attribute`` itself rather than inheriting the derived default.
+
+        A declaration is an override of the derivation, so it must survive
+        ``__init__`` — which means asking the class, not the instance, since
+        ``__init__`` is what would otherwise shadow it.
+        """
+        for klass in cls.__mro__:
+            if klass is SqlAdapterBase:
+                return False
+            if attribute in klass.__dict__:
+                return True
+        return False
+
     def timestamp_sub_days_sql(self, days: int) -> str:
-        raise NotImplementedError
+        """Canonical "now minus N days" fragment.
+
+        Interval arithmetic is the idiom sqlglot most often mistranslates, so
+        this is written in the canonical dialect and snapshot-locked per
+        adapter rather than assumed portable.
+        """
+        return f"{self.timestamp_now_sql} - INTERVAL '{operator.index(days)} days'"
 
     def _columns_query(self, dataset: str, table: str) -> tuple[str, tuple[Any, ...]]:
-        """Canonical ``information_schema.columns`` SELECT + params for this destination."""
-        raise NotImplementedError
+        """Canonical ``information_schema.columns`` SELECT + params for this destination.
+
+        The default assumes the SQL-standard shape: one globally-scoped
+        ``information_schema`` in which dataset and table are *data*, bound as
+        params rather than spliced in as identifiers. Destinations that scope
+        the view per dataset override this.
+        """
+        return (
+            "SELECT column_name, data_type FROM information_schema.columns"
+            " WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position",
+            (dataset, table),
+        )
 
     def render_identifier(self, ident: str) -> str:
-        if not isinstance(ident, str) or not self._identifier_re.fullmatch(ident):
-            raise ValueError(f"invalid {self.name} identifier {ident!r}: must match {self._identifier_re.pattern}")
-        # Canonical (DuckDB) quoting; the transpile step in execute_sql converts
-        # it to the destination-native quoting (e.g. BigQuery backticks).
-        return f'"{ident}"'
+        # Canonical quoting; the transpile step in execute_sql converts it to
+        # the destination-native quoting. Validation and quoting are the shared
+        # boundary rule — this passes the adapter's own grammar into it rather
+        # than restating either half.
+        return render_canonical_identifier(ident, grammar=self._identifier_re, subject=f"{self.name} identifier")
 
     def render_table_ref(self, dataset: str, table: str) -> str:
-        return f"{self.render_identifier(dataset)}.{self.render_identifier(table)}"
+        return render_canonical_table_ref(
+            dataset, table, grammar=self._identifier_re, subject=f"{self.name} identifier"
+        )
 
     def _parse_canonical(self, canonical_sql: str, param_count: int) -> tuple[Any, list[Any]]:
         """Parse one canonical (DuckDB-dialect) statement; validate its placeholders.
@@ -106,7 +206,7 @@ class SqlAdapterBase:
             if native != "?":
                 # Var renders as raw unquoted text, giving e.g. %s / $1 in the output.
                 placeholder.replace(exp.Var(this=native))
-        return statement.sql(dialect=self.name)
+        return statement.sql(dialect=self.dialect)
 
     def _native_placeholder(self, position: int) -> str:
         if self.placeholder_style == "$1":
@@ -116,11 +216,11 @@ class SqlAdapterBase:
     def _prepare_params(self, canonical_sql: str, params: tuple[Any, ...]) -> tuple[str, tuple[Any, ...]]:
         """Native SQL plus the params to actually bind.
 
-        Default: transpile and bind every param — destinations bind NULL
-        natively. When ``inline_null_params`` is set (BigQuery, whose DB-API
-        cannot type a bound ``None``), each ``None`` is inlined as a ``NULL``
-        literal and dropped from the bound tuple, keeping the surviving
-        placeholders (and any ``$n`` numbering) aligned.
+        Default: transpile and bind every param — most destinations bind NULL
+        natively. When ``inline_null_params`` is set (a driver that cannot type
+        a bound ``None``), each ``None`` is inlined as a ``NULL`` literal and
+        dropped from the bound tuple, keeping the surviving placeholders (and
+        any ``$n`` numbering) aligned.
         """
         if not self.inline_null_params or not any(param is None for param in params):
             return self._transpile(canonical_sql, len(params)), params
@@ -135,7 +235,7 @@ class SqlAdapterBase:
             if native != "?":
                 placeholder.replace(exp.Var(this=native))
             bound.append(value)
-        return statement.sql(dialect=self.name), tuple(bound)
+        return statement.sql(dialect=self.dialect), tuple(bound)
 
     def execute_sql(self, client: Any, canonical_sql: str, *params: Any) -> None:
         native_sql, bound = self._prepare_params(canonical_sql, params)
@@ -166,8 +266,8 @@ class SqlAdapterBase:
         try:
             cursor = self.execute_query(client, canonical_sql, *params)
         except DatabaseUndefinedRelation:
-            # Destinations that scope information_schema per dataset (BigQuery)
-            # error on an absent dataset instead of returning zero rows.
+            # Destinations that scope information_schema per dataset error on an
+            # absent dataset instead of returning zero rows.
             return None
         rows = cursor.fetchall()
         if not rows:

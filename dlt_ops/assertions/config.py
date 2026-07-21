@@ -398,17 +398,17 @@ def resolve_predicate(predicate: str, project_root: Path | None = None) -> Calla
 def declared_columns_for_resource(resource: Any) -> tuple[str, ...] | None:
     """Column names from a live resource's ``columns=`` Pydantic model; None when unresolvable.
 
-    dlt keeps the raw model class in ``_hints['columns']`` before instantiation
-    and moves it onto the ``PydanticValidator`` step (``validator.model`` /
-    ``original_model``) once the source is instantiated — both shapes resolve.
+    The public ``columns`` property is no use here: dlt normalizes ``columns=``
+    to a hint dict at decoration time and keeps the class itself on the
+    ``PydanticValidator`` step (public ``validator`` property) plus the private
+    ``original_columns`` hint, which is the only shape that survives on a
+    resource whose validator has not been built yet.
     """
-    hints = getattr(resource, "_hints", {})
     validator = getattr(resource, "validator", None)
     candidates = (
-        hints.get("columns"),
-        hints.get("original_columns"),
         getattr(validator, "original_model", None),
         getattr(validator, "model", None),
+        getattr(resource, "_hints", {}).get("original_columns"),
     )
     for candidate in candidates:
         if isinstance(candidate, type) and issubclass(candidate, pydantic.BaseModel):

@@ -140,6 +140,8 @@ Declare a model per resource and pass it as `columns=`. Match the field types to
 
 ```python
 class Repository(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid")
+
     id: int
     name: str
     stars: int

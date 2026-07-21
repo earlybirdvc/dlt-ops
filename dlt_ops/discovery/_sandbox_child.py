@@ -39,9 +39,15 @@ What the hook flags while the module executes:
                 a spawned process escapes the audit hook entirely, so spawning
                 one at import is itself a finding.
 
+Every candidate event is attributed to a module body before it is recorded
+(:func:`_event_is_project_code`) — the rule targets what the PROJECT's module
+does at import, not what the libraries it imports do to initialise themselves.
+
 Known gaps: C extensions doing raw syscalls bypass CPython audit events;
 ``os.write`` on an inherited fd has no event; anything a spawned subprocess
-does is invisible (the spawn itself is flagged instead).
+does is invisible (the spawn itself is flagged instead); an event raised from
+a thread the target started carries no module body to attribute it to, and
+code ``exec``-ed from a string is not attributable to a project file.
 
 dlt and this package are imported (and dlt decorator machinery warmed up)
 BEFORE the hook arms, so their own import-time file access is never
@@ -52,6 +58,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import FrameType
 
 _NETWORK_EVENTS = {
     "socket.connect",
@@ -79,6 +86,11 @@ _PROCESS_EVENTS = {"subprocess.Popen", "os.system", "os.posix_spawn", "os.exec"}
 _WRITE_FLAG_MASK = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC | os.O_EXCL
 _MAX_VIOLATIONS = 50
 
+# Path parts marking installed third-party code that lives inside the project
+# tree anyway — a virtualenv under the project root is the common case, and its
+# packages are libraries, not project source.
+_VENDOR_PATH_PARTS = frozenset({"site-packages", "dist-packages"})
+
 # The two accepted payload shapes, matched exactly: dispatch is key-based, so
 # a drifted or malformed payload must fail loud here instead of silently
 # taking whichever branch its keys happen to satisfy.
@@ -89,12 +101,67 @@ _PAYLOAD_SHAPES = (
 
 _armed = False
 _violations: list[dict[str, str]] = []
+_project_prefixes: tuple[str, ...] = ()
 
 
 def _record(kind: str, event: str, target: str) -> None:
     entry = {"kind": kind, "event": event, "target": target}
     if entry not in _violations and len(_violations) < _MAX_VIOLATIONS:
         _violations.append(entry)
+
+
+def _set_project_prefixes(project_root: str) -> None:
+    """Pin the path prefixes that count as project code. Called before arming.
+
+    Both the literal root and its realpath, because discovery hands paths
+    through unresolved and a frame's ``co_filename`` may spell the same file
+    either way (on macOS ``/tmp/...`` is a symlink to ``/private/tmp/...``).
+    Everything is ``normcase``-folded so the Windows lane compares paths the way
+    Windows means them — case-insensitively, with separators normalised — since
+    a prefix that fails to match would silently drop findings rather than
+    produce them.
+    """
+    global _project_prefixes
+    roots = {project_root, os.path.realpath(project_root)}
+    _project_prefixes = tuple(sorted(os.path.normcase(root).rstrip(os.sep) + os.sep for root in roots))
+
+
+def _is_project_file(filename: str) -> bool:
+    """True when ``filename`` is the project's own source rather than an installed library.
+
+    Pure string work over a prefix computed before arming: the hook must not
+    touch the filesystem, since a stat from inside it would fire further audit
+    events. With no prefixes pinned the answer is True — attribution is the
+    filter in front of a safety rule, so losing it must make the rule noisy,
+    never silently dead.
+    """
+    if not _project_prefixes:
+        return True
+    folded = os.path.normcase(filename)
+    if not folded.startswith(_project_prefixes):
+        return False
+    return not _VENDOR_PATH_PARTS.intersection(folded.split(os.sep))
+
+
+def _event_is_project_code() -> bool:
+    """Whether the module body currently executing is the project's own.
+
+    The attribution boundary. Walking out from the event, the first frame
+    running a module body (``co_name == "<module>"``) says whose import-time
+    work this is: importing a module always interposes that module's own body
+    frame, so a urllib3 body probing IPv6 while the project module runs
+    ``import requests`` is urllib3 initialising itself. Reaching a PROJECT body
+    frame first means the call chain got to the event without crossing into
+    another module's import — the module-level ``requests.get(...)`` the rule
+    exists to catch. No module body on the stack at all (an event from a thread
+    the target started) leaves nothing to attribute the event to.
+    """
+    frame: FrameType | None = sys._getframe(1)
+    while frame is not None:
+        if frame.f_code.co_name == "<module>":
+            return _is_project_file(frame.f_code.co_filename)
+        frame = frame.f_back
+    return False
 
 
 def _is_write_open(mode: object, flags: object) -> bool:
@@ -121,21 +188,31 @@ def _fmt_target(event: str, args: tuple) -> str:
         return "<unprintable>"
 
 
+def _event_kind(event: str, args: tuple) -> str | None:
+    """The violation kind an audit event represents, or None when it is not one."""
+    if event in _NETWORK_EVENTS:
+        return "network"
+    if event == "open":
+        return "disk-write" if len(args) >= 3 and _is_write_open(args[1], args[2]) else None
+    if event in _FS_MUTATION_EVENTS:
+        return "disk-write"
+    if event in _PROCESS_EVENTS:
+        return "process-spawn"
+    return None
+
+
 def _audit_hook(event: str, args: tuple) -> None:
     if not _armed:
         return
     # The hook fires for every runtime event in the process; it must never
-    # raise (that would corrupt unrelated code paths mid-flight).
+    # raise (that would corrupt unrelated code paths mid-flight). Classify
+    # first, attribute second, format last — the cheap checks gate the ones
+    # that walk frames or repr() arbitrary objects.
     try:
-        if event in _NETWORK_EVENTS:
-            _record("network", event, _fmt_target(event, args))
-        elif event == "open" and len(args) >= 3:
-            if _is_write_open(args[1], args[2]):
-                _record("disk-write", event, str(args[0]))
-        elif event in _FS_MUTATION_EVENTS:
-            _record("disk-write", event, _fmt_target(event, args))
-        elif event in _PROCESS_EVENTS:
-            _record("process-spawn", event, _fmt_target(event, args))
+        kind = _event_kind(event, args)
+        if kind is None or not _event_is_project_code():
+            return
+        _record(kind, event, str(args[0]) if event == "open" else _fmt_target(event, args))
     except Exception:
         pass
 
@@ -171,7 +248,7 @@ def _prepare_dlt() -> None:
     if callable(original_pipeline):
 
         def _marked_pipeline(*args: object, **kwargs: object) -> object:
-            if _armed:
+            if _armed and _event_is_project_code():
                 _record("pipeline-run", "dlt.pipeline", str(kwargs.get("pipeline_name") or args or "<unnamed>"))
             return original_pipeline(*args, **kwargs)
 
@@ -204,6 +281,7 @@ def main() -> int:
             _load_source_module(payload["module_name"], Path(payload["py_file"]))
 
     _prepare_dlt()
+    _set_project_prefixes(payload["project_root"])
 
     sys.addaudithook(_audit_hook)
 

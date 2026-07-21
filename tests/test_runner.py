@@ -121,6 +121,46 @@ def incremental_source(name: str = "incremental_rows"):
     return dlt.source(lambda: events, name=name)()
 
 
+class StrictEvent(pydantic.BaseModel):
+    """A `columns=` model that declares its contract: unknown fields fail the run."""
+
+    model_config = pydantic.ConfigDict(extra="forbid")
+
+    id: int
+
+
+class LooseEvent(pydantic.BaseModel):
+    """A `columns=` model leaving `extra` unset — Pydantic's silent-drop default."""
+
+    id: int
+
+
+class EvolvingEvent(pydantic.BaseModel):
+    """A `columns=` model opting into column evolution."""
+
+    model_config = pydantic.ConfigDict(extra="allow")
+
+    id: int
+
+
+def _batched_source(source_name: str, columns: Any, batches: list[list[dict]]):
+    """Source factory serving one batch per instantiation, so a test can run twice.
+
+    The runner calls ``source_fn()`` per run, so consecutive ``run_pipeline``
+    calls see a fresh source over the next batch — the only way to assert what
+    a *second* run does to an existing table.
+    """
+
+    def build() -> Any:
+        @dlt.resource(name="events", columns=columns)
+        def events():
+            yield batches.pop(0)
+
+        return dlt.source(lambda: events, name=source_name)()
+
+    return build
+
+
 class TestResolution:
     def test_unresolved_destination_fails_before_pipeline_construction(self, make_project, monkeypatch):
         root = make_project(config='[dlt_ops]\ndefault_dataset = "analytics"\n')
@@ -234,7 +274,116 @@ class TestCapabilityTiers:
 
 
 class TestRule10SchemaContract:
-    def test_undeclared_resource_gets_canonical_contract(self, make_project):
+    """The canonical contract reaches a resource by one of two routes, and both
+    are asserted here on the loaded table rather than on the hint dict.
+
+    A Pydantic `columns=` model — which this package's conventions make
+    mandatory — gets its contract from dlt, derived from the model's `extra`
+    setting at decoration time. Only a dict `columns=` or a model-less resource
+    arrives with no contract at all, and those are the ones the runner supplies
+    the literal to. The earlier version of this suite asserted the runtime
+    auto-apply against a resource named "bare" that had no `columns=` at all,
+    so it never touched the route every real source takes.
+    """
+
+    def test_model_forbidding_extra_runs_under_frozen_columns(self, make_project):
+        root = make_project(config=PROJECT_CONFIG)
+        build = _batched_source("strict_probe", StrictEvent, [[{"id": 1}]])
+        instance = build()
+        run_pipeline(make_source_info("strict_probe", lambda: instance), project_root=root)
+        assert instance.selected_resources["events"].schema_contract == CANONICAL_SCHEMA_CONTRACT
+
+    def test_unknown_column_is_rejected_not_silently_dropped(self, make_project):
+        """The headline promise, end to end: a field the model does not declare
+        fails the run, and never reaches the destination."""
+        root = make_project(config=PROJECT_CONFIG)
+        build = _batched_source(
+            "strict_probe",
+            StrictEvent,
+            [[{"id": 1}, {"id": 2}], [{"id": 3, "surprise": "leaked"}]],
+        )
+        info = make_source_info("strict_probe", build)
+
+        pipeline = run_pipeline(info, project_root=root)
+        assert _query(pipeline, "SELECT COUNT(*) FROM analytics.events")[0][0] == 2
+
+        with pytest.raises(Exception) as excinfo:
+            run_pipeline(info, project_root=root)
+        message = str(excinfo.value)
+        assert "surprise" in message
+        assert "freeze" in message
+
+        # Rejected, not absorbed: the offending column never lands, and the
+        # rows that carried it are not partially written either.
+        assert "surprise" not in _table_columns(pipeline, "analytics", "events")
+        assert _query(pipeline, "SELECT COUNT(*) FROM analytics.events")[0][0] == 2
+
+    def test_unknown_column_fails_even_on_the_very_first_run(self, make_project):
+        """A model's contract is enforced in the extract step, so it does not
+        get the new-table free pass the normalize-time contract grants."""
+        root = make_project(config=PROJECT_CONFIG)
+        build = _batched_source("strict_first", StrictEvent, [[{"id": 1, "surprise": "leaked"}]])
+        with pytest.raises(Exception) as excinfo:
+            run_pipeline(make_source_info("strict_first", build), project_root=root)
+        assert "surprise" in str(excinfo.value)
+
+    def test_model_leaving_extra_unset_discards_silently(self, make_project):
+        """Characterization of dlt's derivation, and the reason the
+        `pydantic_model_forbids_extra` rule has to exist.
+
+        Left alone, a model without `extra="forbid"` derives
+        `columns: "discard_value"` and drops unknown fields without a word. The
+        runner deliberately does NOT overwrite that at run time — doing so would
+        also overrule an author's opted-in `extra="allow"` — so the gate is what
+        keeps a project out of this state. If this test ever fails because the
+        contract came out canonical, dlt changed its derivation and the rule's
+        premise needs rechecking.
+        """
+        root = make_project(config=PROJECT_CONFIG)
+        build = _batched_source("loose_probe", LooseEvent, [[{"id": 1, "surprise": "dropped"}]])
+        instance = build()
+        pipeline = run_pipeline(make_source_info("loose_probe", lambda: instance), project_root=root)
+
+        contract = instance.selected_resources["events"].schema_contract
+        assert contract["columns"] == "discard_value"
+        assert contract != CANONICAL_SCHEMA_CONTRACT
+        assert "surprise" not in _table_columns(pipeline, "analytics", "events")
+        assert _query(pipeline, "SELECT COUNT(*) FROM analytics.events")[0][0] == 1
+
+    def test_model_allowing_extra_keeps_its_evolve_contract(self, make_project):
+        """The runner never overwrites a contract dlt derived, in either
+        direction — an opted-in evolving model still evolves."""
+        root = make_project(config=PROJECT_CONFIG)
+        build = _batched_source("evolve_probe", EvolvingEvent, [[{"id": 1, "extra_col": "kept"}]])
+        instance = build()
+        pipeline = run_pipeline(make_source_info("evolve_probe", lambda: instance), project_root=root)
+        assert instance.selected_resources["events"].schema_contract == EVOLVE_SCHEMA_CONTRACT
+        assert "extra_col" in _table_columns(pipeline, "analytics", "events")
+
+    def test_dict_columns_resource_gets_the_canonical_contract_applied(self, make_project):
+        """The route where the runtime literal is genuinely novel: dlt derives
+        nothing from a dict `columns=`, so the runner supplies the contract.
+
+        Enforced at normalize time, where dlt forces `column_mode="evolve"`
+        while the table does not yet exist — first run defines the schema, later
+        unknown columns hard-fail.
+        """
+        root = make_project(config=PROJECT_CONFIG)
+        build = _batched_source(
+            "dict_probe",
+            {"id": {"data_type": "bigint"}},
+            [[{"id": 1}], [{"id": 2, "surprise": "late"}]],
+        )
+        info = make_source_info("dict_probe", build)
+
+        pipeline = run_pipeline(info, project_root=root)
+        assert _table_columns(pipeline, "analytics", "events") >= {"id"}
+
+        with pytest.raises(Exception):
+            run_pipeline(info, project_root=root)
+        assert "surprise" not in _table_columns(pipeline, "analytics", "events")
+
+    def test_resource_without_columns_gets_canonical_contract(self, make_project):
         root = make_project(config=PROJECT_CONFIG)
 
         @dlt.resource(name="bare")
@@ -295,16 +444,38 @@ class TestLoadTimestampStamping:
         pipeline = run_pipeline(info, project_root=root)
         assert "loaded_at" not in _table_columns(pipeline, "analytics", "events")
 
+    def test_padded_config_value_stamps_the_stripped_column(self, make_project):
+        """A padded TOML value stamps the column every other layer expects.
+
+        The runner already treated blank as off by stripping in its guard, so
+        a padded value stamped a column named with its padding intact — a name
+        the `cursor_not_load_timestamp` rule and the reconciler's ignored-column
+        set (both of which strip) would never match.
+        """
+        root = make_project(config=PROJECT_CONFIG + 'load_timestamp_column = "  loaded_at  "\n')
+        info = make_source_info("padded_stamp_rows", simple_rows_source)
+        pipeline = run_pipeline(info, project_root=root)
+        assert "loaded_at" in _table_columns(pipeline, "analytics", "events")
+        rows = _query(pipeline, "SELECT loaded_at FROM analytics.events")
+        assert len(rows) == 3
+        assert all(row[0] is not None for row in rows)
+
     def test_stamp_lands_after_pydantic_freeze_validation(self, make_project):
         """Stamping composes with Rule 14 + Rule 10: the stamp step must sit AFTER
-        the resource's PydanticValidator in the pipe. With columns=freeze (the
-        canonical contract, auto-applied here) dlt builds an extra="forbid"
-        model, so a stamper placed before validation (a plain add_map step,
-        placement_affinity 0 vs the validator's 0.9) makes every model-typed
-        resource reject its own stamped rows."""
+        the resource's PydanticValidator in the pipe. The model's extra="forbid"
+        derives columns=freeze, so a stamper placed before validation (a plain
+        add_map step, placement_affinity 0 vs the validator's 0.9) makes every
+        model-typed resource reject its own stamped rows.
+
+        The model must forbid extra for this to test anything: left unset, the
+        derived contract is discard_value and a mis-placed stamper would have
+        its column quietly dropped instead of rejected.
+        """
         root = make_project(config=PROJECT_CONFIG + 'load_timestamp_column = "loaded_at"\n')
 
         class Row(pydantic.BaseModel):
+            model_config = pydantic.ConfigDict(extra="forbid")
+
             id: int
             value: str
 

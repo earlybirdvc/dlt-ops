@@ -11,8 +11,8 @@ description: Every validation rule dlt-ops pipeline validate can run — the exa
 **Rules resolve from provider defaults, overlaid by the `[dlt_ops.rules]` on/off knob and per-source exemptions; an unknown rule ID is a typo-guard error in both tiers.**
 
 - Rules arrive from **providers** registered in the `dlt_ops.validators` entry-point group. The package's own rules ship through the same mechanism (`core`); installing a plugin distribution with a validator provider auto-activates its rules. A provider that fails to load is reported (its rules are unavailable that run), never silently skipped.
-- Every shipped rule defaults to **on**. `[dlt_ops.rules]` flips individual rules per project (`rule_id = false`); a missing entry means the registered default.
-- `[sources.<X>.dlt_ops.rule_exemptions]` suppresses one rule's findings for one source, with a mandatory non-empty reason string. The rule still runs for every other source.
+- Every shipped rule defaults to **on** except `incremental_cursor_required`, which ships off. `[dlt_ops.rules]` flips individual rules per project (`rule_id = false`, or `rule_id = true` to adopt an opt-in one); a missing entry means the registered default.
+- `[sources.<X>.dlt_ops.rule_exemptions]` suppresses one rule's findings for one source, with a mandatory non-empty reason string. The rule still runs for every other source. One exception: **`import_safety` cannot be exempted per source, and naming it there is a config error** — `validate` fails with a `rule_exemptions.import_safety` finding rather than honouring it. The project-wide `[dlt_ops.rules] import_safety = false` switch is the only opt-out. The refusal is deliberate: every other exemption filters findings out of a rule that only ever reported, whereas this rule also decides whether the module is imported into the calling process at all — a decision made per *module* (one module may declare several sources) in a discovery pass every consumer runs, `run` and the DAG factory included. "Execute project code in this process" is a property of the process, not of one source being loaded into it. The refusal itself rides the always-on import-health path rather than the rule framework, so the very exemption being refused cannot suppress the refusal.
 - Rule IDs are **stable within a major version** — the knob and exemption tables key on them.
 - Unknown rule IDs in either table are errors: `validate` fails, and so does the Tier-2 runtime preflight on every `run` / `backfill` (the typo guard).
 
@@ -20,7 +20,7 @@ Inspect the resolution for your project — the command prints every known rule 
 
 ```console
 $ dlt-ops pipeline validate --show-resolved-rules
-Resolved rules (21):
+Resolved rules (23):
   bigquery_partitioning                on   bigquery
   bigquery_partition_hints             on   bigquery
   import_safety                        on   core
@@ -32,9 +32,11 @@ Resolved rules (21):
   no_resource_overlap                  on   core
   json_hints_for_dict_fields           on   core
   pydantic_columns_required            on   core
+  pydantic_model_forbids_extra         on   core
   schema_contract_declared             on   core
   explicit_resource_name_multi_source  on   core
   cursor_not_load_timestamp            on   core
+  incremental_cursor_required          off  core
   secret_backend_registered            on   core
   alert_sink_registered                on   core
   destination_capability               on   core
@@ -44,7 +46,9 @@ Resolved rules (21):
   assertion_predicate_resolvable       on   core
 ```
 
-A bare environment resolves **21 rules**: 19 from `core` and 2 from `bigquery`. The `airflow` provider adds one more (`airflow_var_required`) only when the `[airflow]` extra is installed — it loads either way, so `plugins doctor` stays green on a bare install, but contributes no rules until `airflow` is importable, and so does not appear above.
+A bare environment resolves **23 rules**: 21 from `core` and 2 from `bigquery`. The `airflow` provider adds one more (`airflow_var_required`) only when the `[airflow]` extra is installed — it loads either way, so `plugins doctor` stays green on a bare install, but contributes no rules until `airflow` is importable, and so does not appear above.
+
+Every core rule but one defaults to on. `incremental_cursor_required` ships **off**, and this listing is where you discover it — the section below explains why it is a project's decision rather than a default.
 
 To switch a rule off, set it to `false` under `[dlt_ops.rules]`; to exempt one source, name the rule under that source's `[dlt_ops.rule_exemptions]` with a reason. Both key on the rule ID:
 
@@ -56,7 +60,7 @@ stale_sources = false                        # off project-wide
 pydantic_columns_required = "third-party generator yields untyped rows"   # off for one source
 ```
 
-Findings are errors unless tagged **warning** below; warnings fail the run only under `validate --strict`.
+Findings are errors unless tagged **warning** below. Warnings are only ever rendered by `validate --strict`, which is also the only mode in which they fail the command — a default `validate` run filters them out before printing, so a project whose sole findings are warnings prints `✓ All sources validated successfully` and exits 0. Run `--strict` when you want to see them; that is what the rules tagged warning below are worth in practice.
 
 ## Rule catalog
 
@@ -73,9 +77,11 @@ Findings are errors unless tagged **warning** below; warnings fail the run only 
 | [`no_resource_overlap`](#no_resource_overlap) | core | Tier 1 | No two sources in a pipeline directory declare a resource with the same name. |
 | [`json_hints_for_dict_fields`](#json_hints_for_dict_fields) | core | Tier 1 | Every Pydantic `dict` / `list[dict]` field carries a `data_type="json"` column hint. |
 | [`pydantic_columns_required`](#pydantic_columns_required) | core | Tier 1 | Every `@dlt.resource` declares `columns=` resolving to a Pydantic model. |
-| [`schema_contract_declared`](#schema_contract_declared) | core | Tier 1 | A declared `schema_contract` is exactly the canonical freeze literal (or the opted-in evolve literal); none = auto-applied. |
+| [`pydantic_model_forbids_extra`](#pydantic_model_forbids_extra) | core | Tier 1 | No `columns=` model resolves to a `discard_value` contract — unknown columns must fail, not vanish. |
+| [`schema_contract_declared`](#schema_contract_declared) | core | Tier 1 | A declared `schema_contract` is exactly the canonical freeze literal (or the opted-in evolve literal). |
 | [`explicit_resource_name_multi_source`](#explicit_resource_name_multi_source) | core | Tier 1 | In multi-source directories, every `@dlt.resource` passes an explicit `name=`. |
 | [`cursor_not_load_timestamp`](#cursor_not_load_timestamp) | core | Tier 1 | No incremental cursor uses the configured `load_timestamp_column`. |
+| [`incremental_cursor_required`](#incremental_cursor_required) | core | Tier 1 · **off by default** | Every resource of a recurring-schedule source declares an incremental cursor. |
 | [`secret_backend_registered`](#secret_backend_registered) | core | Tier 1 + Tier-2 twin | Every engaged secret backend resolves to a registered, healthy `secret_backend` plugin. |
 | [`alert_sink_registered`](#alert_sink_registered) | core | Tier 1 + Tier-2 twin | Every configured `alert_sinks` name is a registered, constructible `alert_sink` plugin. |
 | [`destination_capability`](#destination_capability) | core | Tier 1 + Tier-2 twin | The resolved destination supports each adapter-gated feature the source engages (else error, or a core-tier warning). |
@@ -91,17 +97,25 @@ Findings are errors unless tagged **warning** below; warnings fail the run only 
 
 **Every rule on this page is Tier 1: statically checkable, run by `validate` (pre-deploy, CI).** The runtime does not trust that `validate` ever ran — every `run` / `backfill` additionally executes a narrow **Tier-2 preflight** that hard-fails on critical preconditions: a referenced plugin not registered (secret backend, alert sink, assertion type), a destination that dlt cannot resolve or that engages an adapter-gated feature it cannot provide (a registered-but-broken or capability-incomplete adapter fails here too), a plugin that soft-failed at load, an unknown rule ID in `[dlt_ops.rules]`, and backfill bounds supplied for resources without an incremental cursor. The overlap with Tier 1 (`secret_backend_registered`, `alert_sink_registered`, `destination_capability`, the `assertion_*` rules, the typo guard) is deliberate redundancy: orchestrator-triggered runs must fail fast rather than degrade silently. Tier 2 is not configurable and has no rule IDs — the per-rule tags below mark which rules have a Tier-2 twin.
 
-One check sits outside the rule framework entirely: **import-error surfacing**. A source module that cannot be imported cannot run, so it is always reported by `validate` — no rule ID, no knob.
+Three findings sit outside the rule framework entirely — always on, no rule ID, no knob, and no exemption:
+
+- **`import`** — a source module that cannot be imported cannot run, so `validate` always reports it.
+- **`validation_coverage`** — one error per source the Phase-2 sandbox excluded, naming the rule coverage that exclusion cost. Every rule that iterates sources skipped it, so its findings are unknown rather than clean, and saying so is what keeps "no findings" from reading like "checked and fine".
+- **`rule_exemptions.import_safety`** — the refusal described above, when a source tries to exempt `import_safety` per source.
+
+All three ride this path rather than the rule framework for the same reason: a rule's findings are filtered by that source's exemptions, so routing any of them through a rule would let the thing being reported suppress its own report.
 
 ## Core rules (plugin: `core`)
 
-**The core rules ship with the base distribution's `core` provider and are on by default.**
+**The core rules ship with the base distribution's `core` provider. All are on by default except `incremental_cursor_required`.**
 
 ### `import_safety`
 
 *Tier 1 (`validate`).*
 
 **Source modules must be import-safe: no network I/O, no disk writes, no pipeline runs, no process spawns at module load** (disk **reads** are fine). Findings come from the Phase-2 sandbox, which imports each module under CPython audit hooks. This catches the orchestrator foot-gun where a module-level `requests.get(...)` fires on every scheduler heartbeat that parses the file. Disabling the rule (`import_safety = false`) also skips the sandbox entirely; per-module import errors are still isolated so a broken module never breaks sibling discovery.
+
+**This is the one rule with no per-source exemption.** Listing it under `[sources.<X>.dlt_ops.rule_exemptions]` fails `validate` as a config error; the project-wide switch is the only way off.
 
 ### `config_section_required`
 
@@ -131,7 +145,7 @@ One check sits outside the rule framework entirely: **import-error surfacing**. 
 
 *Tier 1 (`validate`) · warning.*
 
-**A `[sources.<X>]` section with no matching discovered source is flagged** — usually a leftover from a deleted source or a typo'd section name. Known dlt-native sections (`data_writer`, `normalize`, `load`, `extract`) are excluded.
+**A `[sources.<X>]` section with no matching discovered source is flagged** — usually a leftover from a deleted source or a typo'd section name. Known dlt-native sections (`data_writer`, `normalize`, `load`, `extract`) are excluded. Being a warning, it appears only under `validate --strict`.
 
 ### `no_resource_overlap`
 
@@ -151,11 +165,32 @@ One check sits outside the rule framework entirely: **import-error surfacing**. 
 
 **Every `@dlt.resource` declares `columns=` resolving to a Pydantic model.** Without a declared schema, dlt infers types at load time — and a column whose values are all NULL in the first load is silently dropped, then can never be added under a frozen-columns contract. Attribute references (`columns=cfg.model`, the factory pattern) are accepted.
 
+### `pydantic_model_forbids_extra`
+
+*Tier 1 (`validate`).*
+
+**No resource runs under a `columns: "discard_value"` contract.** dlt derives a resource's `schema_contract` from its `columns=` model: `extra="forbid"` derives `columns: "freeze"`, `extra="allow"` derives `"evolve"`, and leaving `extra` unset — Pydantic's default — derives `"discard_value"`. Under `discard_value` a field the model does not declare is stripped from every row with no error, no warning, and no trace in the load package, so a source that starts sending a new column looks identical to one that never did.
+
+The fix is one line on the model:
+
+```python
+class Order(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid")
+
+    id: int
+```
+
+The rule reads the contract dlt derived rather than re-deriving it, so it cannot drift from dlt's own mapping, and it passes a resource that reaches a non-discarding contract by any route — an explicit canonical `schema_contract=` literal overrides the model's `extra` inside dlt, and a strict base class propagates through Pydantic's `model_config` merge. `extra="allow"` passes here; whether the source may evolve at all is [`schema_contract_declared`](#schema_contract_declared)'s business.
+
 ### `schema_contract_declared`
 
 *Tier 1 (`validate`).*
 
-**A resource that declares no `schema_contract` passes — the runtime auto-applies the canonical contract (`{"tables": "evolve", "columns": "freeze", "data_type": "freeze"}`).** A declared contract must be exactly the canonical literal, or the evolve literal (`columns: "evolve"`) on a source that opted in with a non-empty `schema_contract_evolve_reason` in config. Anything else is an error: contracts are a project policy, not a per-resource preference.
+**A resource that declares no `schema_contract` passes.** For a Pydantic `columns=` model — which `pydantic_columns_required` makes mandatory — dlt has already derived the contract from the model's `extra`, and [`pydantic_model_forbids_extra`](#pydantic_model_forbids_extra) is what keeps that derivation canonical. Only a dict `columns=` or a resource with no `columns=` at all reaches the runner without a contract, and those are the ones it applies the canonical literal (`{"tables": "evolve", "columns": "freeze", "data_type": "freeze"}`) to.
+
+A declared contract must be exactly the canonical literal, or the evolve literal (`columns: "evolve"`) on a source that opted in with a non-empty `schema_contract_evolve_reason` in config. Anything else is an error: contracts are a project policy, not a per-resource preference.
+
+The two routes are not interchangeable, and the difference shows up on the first run. The runtime-applied literal is enforced at normalize time, where dlt gives a brand-new table one free pass — the first run defines the schema, and every later unknown column hard-fails. A model's `extra="forbid"` is enforced earlier, in the extract step, so it rejects an unknown column even on the very first run.
 
 ### `explicit_resource_name_multi_source`
 
@@ -167,7 +202,33 @@ One check sits outside the rule framework entirely: **import-error surfacing**. 
 
 *Tier 1 (`validate`).*
 
-**No `dlt.sources.incremental(...)` uses the configured `[dlt_ops] load_timestamp_column` as its cursor.** That column advances on every run, so cursoring on it silently skips in-window source updates — use the provider's business timestamp instead. Inert when `load_timestamp_column` is unset.
+**No `dlt.sources.incremental(...)` uses the configured `[dlt_ops] load_timestamp_column` as its cursor.** That column advances on every run, so cursoring on it silently skips in-window source updates — use the provider's business timestamp instead. Inert when `load_timestamp_column` is unset. It catches a *wrong* cursor; a *missing* one is the next rule's question.
+
+### `incremental_cursor_required`
+
+*Tier 1 (`validate`) · **off by default**.*
+
+**Every resource of a source declaring a recurring schedule declares an incremental cursor.** Its sibling above catches a cursor pointed at the wrong column, and only when `load_timestamp_column` is configured; a resource with no cursor at all re-extracts everything on every run while `validate` exits 0. This rule closes that gap.
+
+It is the one core rule that ships **off**, and the reason is that it states a policy rather than a defect. A full refresh is a legitimate choice — a small dimension table is the obvious case — and nothing visible to the package distinguishes "chose to full-refresh" from "forgot the cursor". Turning it on is therefore a project's decision, not an upgrade surprise:
+
+```toml
+[dlt_ops.rules]
+incremental_cursor_required = true
+```
+
+Three details govern what it flags:
+
+- **Scoped to recurring schedules.** The harm is a full refresh repeating on a cadence, so `@manual` sources and sources with no parsed config are out of scope.
+- **It reads the live resource, not the source text.** `apply_hints(incremental=...)` and factory-built cursors are invisible to an AST scan, and a false "no cursor" would be worse than the gap it closes. That means the rule needs the source to import — a source excluded from Phase 2 is reported by `validation_coverage` instead.
+- **Error, not warning, when it is on.** Warnings are filtered out of every non-`--strict` run, so a warning here would be invisible in exactly the run that matters.
+
+Exemptions are per source, so a source that deliberately mixes incremental and full-refresh resources exempts all of them together, with the reason recorded:
+
+```toml
+[sources.dim_countries.dlt_ops.rule_exemptions]
+incremental_cursor_required = "small dimension table; a full refresh is intended"
+```
 
 ### `secret_backend_registered`
 
@@ -193,7 +254,7 @@ Checkpoint engagement is detected by the Phase-1 **AST scan**: `@with_checkpoint
 
 *Tier 1 (`validate`) · warning.*
 
-**A source with run history in the `_dlt_ops_runs` ledger whose last run started more than `staleness_days` ago (default 7) is flagged as ingested-then-orphaned.** Sources with zero history are skipped — they have nothing to be stale relative to. Degrades gracefully: without destination access (unresolved destination, unreachable ledger) the rule stays quiet, so `validate` never requires credentials.
+**A source with run history in the `_dlt_ops_runs` ledger whose last run started more than `staleness_days` ago (default 7) is flagged as ingested-then-orphaned.** Sources with zero history are skipped — they have nothing to be stale relative to. Degrades gracefully: without destination access (unresolved destination, unreachable ledger) the rule stays quiet, so `validate` never requires credentials. Being a warning, its findings appear only under `validate --strict` — that is the invocation to schedule if you want staleness reported.
 
 ### `assertion_config_valid`
 

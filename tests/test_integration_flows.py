@@ -134,6 +134,8 @@ from dlt.sources.filesystem import filesystem, read_jsonl
 
 
 class Event(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid")
+
     id: int
     name: str
     amount: float
@@ -168,6 +170,8 @@ from dlt.sources.sql_database import sql_table
 
 
 class Customer(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid")
+
     id: int
     name: str
     email: str
@@ -204,6 +208,8 @@ import pydantic
 
 
 class Metric(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid")
+
     id: int
     name: str
     value: float

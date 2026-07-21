@@ -4,7 +4,7 @@ description: Schedule a dlt-ops project on Prefect — a thin @flow per source t
 
 # Schedule a project on Prefect
 
-`dlt-ops` ships no Prefect adapter, and Prefect does not need one: a thin `@flow` shells out to `dlt-ops pipeline run -s <source> -y` and lets Prefect schedule, retry, and observe it. This is the well-worn "one generic flow, one deployment per source" pattern, with the dlt-ops CLI as the unit of work — so the runs ledger, assertions, checkpoints, and backfill all stay in force.
+`dlt-ops` ships no Prefect adapter, and Prefect does not need one: a thin `@flow` shells out to `dlt-ops pipeline run -s <source> -y` and lets Prefect schedule, retry, and observe it. This is the well-worn "one generic flow, one deployment per source" pattern, with the dlt-ops CLI as the unit of work — so the runs ledger, assertions, and checkpoints all stay in force.
 
 **Prerequisites**
 
@@ -43,7 +43,7 @@ def ingest(source: str) -> None:
     run_source(source)
 ```
 
-Because the work is `dlt-ops pipeline run`, every dlt-ops guarantee holds — the runs ledger, pre-load assertions, checkpoint resume, and backfill window injection live in the CLI's runner, not in the flow (secrets reach dlt via env or `secrets.toml`, exactly as on the [deployment page](deployment.md), where the command's exit-code contract and real output also live).
+Because the work is `dlt-ops pipeline run`, every dlt-ops guarantee holds — the runs ledger, pre-load assertions, and checkpoint resume live in the CLI's runner, not in the flow (secrets reach dlt via env or `secrets.toml`, exactly as on the [deployment page](deployment.md), where the command's exit-code contract and real output also live). `run` takes no window flags; a bounded, chunked, resumable window is the separate `dlt-ops pipeline backfill --from --to --chunk` verb, so a flow that must re-ingest a specific window shells out to that instead ([backfill guide](backfill.md)).
 
 ## One scheduled deployment per source
 

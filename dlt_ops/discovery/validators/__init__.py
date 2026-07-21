@@ -5,7 +5,6 @@ from dlt_ops.discovery.validators.assertions import (
     validate_assertion_predicates,
 )
 from dlt_ops.discovery.validators.config import (
-    validate_airflow_vars,
     validate_alert_sinks,
     validate_config_sections,
     validate_decorator_names,
@@ -20,13 +19,16 @@ from dlt_ops.discovery.validators.import_safety import (
     validate_import_safety,
 )
 from dlt_ops.discovery.validators.platform_rules import (
+    INCREMENTAL_CURSOR_RULE_ID,
     validate_cursor_not_load_timestamp,
+    validate_incremental_cursor_required,
     validate_resource_name_explicit_in_multi_source_dir,
     validate_schema_contract,
 )
 from dlt_ops.discovery.validators.resources import validate_no_resource_overlap
 from dlt_ops.discovery.validators.schema import (
     validate_json_column_hints,
+    validate_pydantic_model_forbids_extra,
     validate_resource_columns_hint,
 )
 from dlt_ops.discovery.validators.staleness import validate_stale_sources
@@ -38,8 +40,8 @@ from dlt_ops.discovery.validators.staleness import validate_stale_sources
 # a rule (no ID, no knob).
 #
 # Destination- and orchestrator-specific rules live in their plugin's own
-# provider (`dlt_ops.bigquery.validators:bigquery_rules`; the Airflow
-# plugin registers `validate_airflow_vars` as `airflow_var_required`) — core
+# provider, body included — `dlt_ops.bigquery.validators:bigquery_rules` and
+# `dlt_ops.airflow.validators:airflow_rules` (`airflow_var_required`). Core
 # stays destination- and orchestrator-agnostic.
 #
 # Rule IDs are stable within a major version; the knob
@@ -56,6 +58,14 @@ CORE_RULES: tuple[RuleSpec, ...] = (
     RuleSpec(rule_id="no_resource_overlap", validator=validate_no_resource_overlap, plugin="core"),
     RuleSpec(rule_id="json_hints_for_dict_fields", validator=validate_json_column_hints, plugin="core"),
     RuleSpec(rule_id="pydantic_columns_required", validator=validate_resource_columns_hint, plugin="core"),
+    # Runs right after pydantic_columns_required: that rule mandates the model,
+    # this one makes the contract dlt derives from it fail loudly rather than
+    # discard silently.
+    RuleSpec(
+        rule_id="pydantic_model_forbids_extra",
+        validator=validate_pydantic_model_forbids_extra,
+        plugin="core",
+    ),
     RuleSpec(rule_id="schema_contract_declared", validator=validate_schema_contract, plugin="core"),
     RuleSpec(
         rule_id="explicit_resource_name_multi_source",
@@ -63,6 +73,17 @@ CORE_RULES: tuple[RuleSpec, ...] = (
         plugin="core",
     ),
     RuleSpec(rule_id="cursor_not_load_timestamp", validator=validate_cursor_not_load_timestamp, plugin="core"),
+    # The only opt-in core rule. Its sibling above catches a WRONG cursor; this
+    # one catches a MISSING one, which is a policy rather than a defect — a full
+    # refresh is legitimate, and nothing the package can see separates "chose to"
+    # from "forgot to". Shipped off so adopting it is a decision, not an upgrade
+    # surprise; `validate --show-resolved-rules` is where it is discovered.
+    RuleSpec(
+        rule_id=INCREMENTAL_CURSOR_RULE_ID,
+        validator=validate_incremental_cursor_required,
+        plugin="core",
+        default_on=False,
+    ),
     RuleSpec(rule_id="secret_backend_registered", validator=validate_secret_backends, plugin="core"),
     RuleSpec(rule_id="alert_sink_registered", validator=validate_alert_sinks, plugin="core"),
     RuleSpec(rule_id="destination_capability", validator=validate_destination_capability, plugin="core"),
@@ -86,14 +107,15 @@ def core_rules() -> tuple[RuleSpec, ...]:
 
 __all__ = [
     "CORE_RULES",
+    "INCREMENTAL_CURSOR_RULE_ID",
     "core_rules",
-    "validate_airflow_vars",
     "validate_alert_sinks",
     "validate_assertion_columns",
     "validate_assertion_config",
     "validate_assertion_predicates",
     "validate_config_sections",
     "validate_cursor_not_load_timestamp",
+    "validate_incremental_cursor_required",
     "validate_decorator_names",
     "validate_destination_capability",
     "validate_import_errors",
@@ -102,6 +124,7 @@ __all__ = [
     "validate_module_names",
     "validate_no_resource_overlap",
     "validate_orphan_sections",
+    "validate_pydantic_model_forbids_extra",
     "validate_resource_columns_hint",
     "validate_resource_name_explicit_in_multi_source_dir",
     "validate_schema_contract",

@@ -43,23 +43,13 @@ after the traversal, gated by ``dry_run``.
 from __future__ import annotations
 
 import logging
-import time
-from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
-from dlt_ops.config import (
-    ProjectConfig,
-    ProjectConfigError,
-    find_project_root,
-    load_project_config,
-    resolve_dataset,
-    resolve_destination,
-)
+from dlt_ops.config import ProjectConfig
 from dlt_ops.discovery.models import SourceInfo
-from dlt_ops.discovery.scanner import discover_sources
-from dlt_ops.reconciler._emission import emit_findings, resolve_sink
 from dlt_ops.reconciler.common import (
+    DetectionContext,
     build_reproduce_sql,
     canonical_ident,
     canonical_table_ref,
@@ -67,6 +57,8 @@ from dlt_ops.reconciler.common import (
     destination_column_names,
     resolve_source_naming,
     resource_pydantic_model,
+    run_detection,
+    with_resolved_sink,
 )
 from dlt_ops.reconciler.models import DriftFinding, DriftKind, ReconcileResult
 
@@ -173,9 +165,10 @@ def _detect_removal_for_resource(
 ) -> DriftFinding | None:
     """Compute coverage windows for one resource; return a finding if drift.
 
-    ``naming`` is threaded from the source-level caller so every resource in
-    the sweep shares the same NamingConvention lookup — see the twin comment
-    on ``additive._detect_resource_drift`` for the rationale.
+    ``naming`` is the destination-side NamingConvention resolved once at the
+    source level via ``resolve_source_naming`` — threaded down so every
+    resource's model-column set is normalized with the same convention dlt
+    actually uses on the write path.
     """
     model = resource_pydantic_model(source, resource_name)
     if model is None:
@@ -284,7 +277,7 @@ def _detect_removal_drift(
     """
     # Resolve the source's own NamingConvention once so every resource shares
     # a single lookup and every SQL projection targets the exact column names
-    # dlt actually wrote — see the twin comment in additive.py.
+    # dlt actually wrote — not a hardcoded default.
     naming = resolve_source_naming(source)
     findings: list[DriftFinding] = []
     for resource_name in source.resources:
@@ -313,6 +306,19 @@ def _detect_removal_drift(
     return findings
 
 
+def _require_load_timestamp_column(project_config: ProjectConfig) -> str | None:
+    """Precheck: no time axis, no windowed coverage.
+
+    Skipping is deliberate and never a failure (00-current-state decision 3),
+    so a project without the knob still sweeps additive drift; the returned
+    message becomes the result's warning.
+    """
+    if configured_load_timestamp_column(project_config) is not None:
+        return None
+    logger.warning(LOAD_TIMESTAMP_UNSET_WARNING)
+    return LOAD_TIMESTAMP_UNSET_WARNING
+
+
 def _detect_removal_inner(
     source_name: str,
     *,
@@ -328,93 +334,39 @@ def _detect_removal_inner(
     baseline_window_days: int,
     sink: "AlertSink",
 ) -> ReconcileResult:
-    started = time.monotonic()
+    """Detection + emission for one source WITHOUT flushing the sink.
 
-    def _elapsed_ms() -> int:
-        return int((time.monotonic() - started) * 1000)
+    Runs on the shared driver with no ``needs_fetcher``: coverage windows are
+    computed by query, so an injected runner alone is enough and no destination
+    boundary is opened for a schema fetch this detector never makes.
+    """
 
-    def _failed(message: str) -> ReconcileResult:
-        return ReconcileResult(source_name=source_name, findings=(), duration_ms=_elapsed_ms(), error=message)
-
-    try:
-        if sources is None or project_config is None:
-            root = project_root if project_root is not None else find_project_root()
-            if sources is None:
-                sources = discover_sources(root)
-            if project_config is None:
-                project_config = load_project_config(root)
-    except Exception as exc:
-        sink.emit_error(exc, source_name=source_name, context="discover_sources")
-        logger.exception("project discovery failed for source=%s", source_name)
-        return _failed(f"discover_sources failed: {exc}")
-
-    source = sources.get(source_name)
-    if source is None:
-        return _failed(f"source {source_name!r} not found in discovered sources")
-
-    # No time axis, no windowed coverage: skip detection, surface the
-    # degradation as a warning (00-current-state decision 3) — never a
-    # failure, so a project without the knob still sweeps additive drift.
-    load_timestamp_column = configured_load_timestamp_column(project_config)
-    if load_timestamp_column is None:
-        logger.warning(LOAD_TIMESTAMP_UNSET_WARNING)
-        return ReconcileResult(
-            source_name=source_name,
-            findings=(),
-            duration_ms=_elapsed_ms(),
-            error=None,
-            warnings=(LOAD_TIMESTAMP_UNSET_WARNING,),
+    def _detect(ctx: DetectionContext) -> list[DriftFinding]:
+        return _detect_removal_drift(
+            ctx.source,
+            runner=ctx.runner,
+            dataset=ctx.dataset,
+            # The precheck already rejected an unset column for this run.
+            load_timestamp_column=cast("str", configured_load_timestamp_column(ctx.project_config)),
+            baseline_threshold=baseline_threshold,
+            recent_threshold=recent_threshold,
+            recent_window_hours=recent_window_hours,
+            baseline_window_days=baseline_window_days,
+            sink=ctx.sink,
         )
 
-    try:
-        resolved_dataset = dataset if dataset is not None else resolve_dataset(source.config, project_config)
-    except ProjectConfigError as exc:
-        return _failed(str(exc))
-
-    with ExitStack() as stack:
-        if runner is not None:
-            resolved_runner = runner
-        else:
-            try:
-                destination = resolve_destination(source.config, project_config)
-            except ProjectConfigError as exc:
-                return _failed(str(exc))
-            from dlt_ops.reconciler._adapters import destination_defaults
-
-            try:
-                _, default_runner = stack.enter_context(
-                    destination_defaults(source.name, destination, resolved_dataset)
-                )
-            except Exception as exc:
-                sink.emit_error(exc, source_name=source_name, context="open_destination")
-                logger.exception("failed to open destination for source=%s", source_name)
-                return _failed(f"failed to open destination {destination!r}: {exc}")
-            resolved_runner = default_runner
-
-        try:
-            findings = _detect_removal_drift(
-                source,
-                runner=resolved_runner,
-                dataset=resolved_dataset,
-                load_timestamp_column=load_timestamp_column,
-                baseline_threshold=baseline_threshold,
-                recent_threshold=recent_threshold,
-                recent_window_hours=recent_window_hours,
-                baseline_window_days=baseline_window_days,
-                sink=sink,
-            )
-        except Exception as exc:
-            sink.emit_error(exc, source_name=source_name, context="reconcile_removal")
-            return _failed(f"source-level failure: {exc}")
-
-    if not dry_run:
-        emit_findings(sink, findings)
-
-    return ReconcileResult(
-        source_name=source_name,
-        findings=tuple(findings),
-        duration_ms=_elapsed_ms(),
-        error=None,
+    return run_detection(
+        source_name,
+        detect=_detect,
+        dry_run=dry_run,
+        sink=sink,
+        runner=runner,
+        dataset=dataset,
+        sources=sources,
+        project_root=project_root,
+        project_config=project_config,
+        precheck=_require_load_timestamp_column,
+        source_error_context="reconcile_removal",
     )
 
 
@@ -448,9 +400,12 @@ def detect_removal(
     ``runner=None`` and the reconciler opens the source's own resolved
     destination through the DestinationAdapter boundary.
     """
-    resolved_sink = resolve_sink(sink, dry_run=dry_run, project_config=project_config, project_root=project_root)
-    try:
-        return _detect_removal_inner(
+    return with_resolved_sink(
+        sink,
+        dry_run=dry_run,
+        project_config=project_config,
+        project_root=project_root,
+        run=lambda resolved_sink: _detect_removal_inner(
             source_name,
             dry_run=dry_run,
             runner=runner,
@@ -463,6 +418,5 @@ def detect_removal(
             recent_window_hours=recent_window_hours,
             baseline_window_days=baseline_window_days,
             sink=resolved_sink,
-        )
-    finally:
-        resolved_sink.flush()
+        ),
+    )

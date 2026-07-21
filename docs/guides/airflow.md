@@ -31,7 +31,7 @@ This guide takes a dlt-ops project from `schedule` tags in TOML to running Airfl
 pip install "dlt-ops[airflow]"
 ```
 
-The extra pulls `apache-airflow>=2.9` (the oldest version the adapter is CI-tested against) on top of the core package. The adapter has two surfaces with different import requirements, and the split is what keeps laptops and CI honest: the **plugin surface** — the Variable secret backend and the Airflow validator provider — is importable *without* Airflow, so `validate` and `plugins doctor` stay healthy on a bare install; the **adapter surface** — the DAG factory and the cleanup task — hard-requires it. On the bare install this guide is verified in:
+The extra pulls `apache-airflow>=2.9` on top of the core package — a floor, like every other dependency here, not a tested range. What CI actually exercises is one version: the `test-airflow` lane runs `uv sync --locked`, so it installs the Airflow pinned in `uv.lock` (currently 2.11.2), and that lane is non-blocking. Treat 2.9 as "the adapter is written against this API and nothing declares an upper bound", and 2.11.x as the version with test evidence behind it. The adapter has two surfaces with different import requirements, and the split is what keeps laptops and CI honest: the **plugin surface** — the Variable secret backend and the Airflow validator provider — is importable *without* Airflow, so `validate` and `plugins doctor` stay healthy on a bare install; the **adapter surface** — the DAG factory and the cleanup task — hard-requires it. On the bare install this guide is verified in:
 
 ```bash
 dlt-ops plugins doctor
@@ -140,7 +140,7 @@ dlt-ops pipeline validate --show-resolved-rules
 ```
 
 ```text
-Resolved rules (21):
+Resolved rules (23):
   bigquery_partitioning                on   bigquery
   bigquery_partition_hints             on   bigquery
   import_safety                        on   core

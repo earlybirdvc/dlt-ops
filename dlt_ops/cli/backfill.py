@@ -7,7 +7,9 @@ Splits ``[--from, --to)`` into sequential chunks; each chunk is its own
 (see ``dlt_ops.runs.backfill_state``): re-running the same
 ``--from --to --chunk`` triple skips completed chunks, retries failed ones,
 and continues pending ones. Concurrent invocations on the same backfill
-coordinate via optimistic CAS claiming only — a lost claim is silent.
+coordinate via optimistic CAS claiming only; a chunk another worker holds is
+skipped here and reported — the invocation exits non-zero, because it did not
+cover the window it was asked to cover.
 
 Locked semantics enforced before any chunk runs:
 - bounds parsable, timezone-aware (naive rejected), normalized to UTC;
@@ -43,6 +45,7 @@ from dlt_ops.discovery import discover, introspect
 from dlt_ops.discovery.runner import run_pipeline
 from dlt_ops.preflight import PreflightError, run_preflight
 from dlt_ops.runs.backfill_state import (
+    BackfillStateError,
     ChunkStatus,
     backfill_id_for,
     chunk_id_for,
@@ -142,13 +145,28 @@ def compute_chunks(window_from: datetime, window_to: datetime, chunk: timedelta)
 
 @attrs.frozen
 class BackfillSummary:
-    """Per-invocation chunk tally; chunks lost to another worker are not failures."""
+    """Per-invocation chunk tally.
+
+    ``lost`` counts chunks another worker's token held that were still not
+    ``completed`` when the invocation ended — the window is not covered and
+    this invocation cannot say when it will be, which is why a non-zero
+    ``lost`` denies the command its clean exit (see :func:`backfill`). A chunk
+    another worker did finish counts as ``skipped``: covered is covered,
+    whoever ran it. A claim that never applied is not counted here at all —
+    it raises :class:`~dlt_ops.runs.backfill_state.BackfillStateError` and
+    stops the invocation, because then *nobody* holds that chunk.
+    """
 
     backfill_id: str
     total: int
     completed: int
     skipped: int
     lost: int
+
+    @property
+    def window_covered(self) -> bool:
+        """Every chunk of the window is accounted for by this invocation."""
+        return self.completed + self.skipped == self.total
 
 
 def _check_import_safe(source: SourceInfo) -> None:
@@ -188,9 +206,11 @@ def execute_backfill(
     including the incremental-cursor and destination-capability conditions —
     backfill declares its chunk state as adapter-gated, so an adapter-less
     destination is refused here) all happens before any chunk runs or any
-    state row is written. Chunks execute sequentially; a lost CAS claim moves
-    on silently, a chunk failure marks the row ``failed`` and stops the
-    invocation — re-running the same triple resumes.
+    state row is written. Chunks execute sequentially; a chunk another worker
+    already holds is counted in ``lost`` and skipped, a chunk failure marks the
+    row ``failed`` and stops the invocation — re-running the same triple
+    resumes. A claim that never applied stops the invocation too: no worker
+    holds that chunk, so continuing would leave its window unbackfilled.
 
     Args:
         source: Introspected SourceInfo (import-safe, callable attached).
@@ -210,6 +230,8 @@ def execute_backfill(
             DestinationAdapter — chunk state needs one).
         ProjectConfigError: destination/dataset don't resolve.
         BackfillChunkError: a chunk run raised; state marked ``failed``.
+        BackfillStateError: a chunk's CAS claim never applied — a destination
+            failure that would otherwise skip that chunk's time window.
     """
     check_window(window_from, window_to)
     _check_import_safe(source)
@@ -230,7 +252,8 @@ def execute_backfill(
     backfill_id = backfill_id_for(source.name, window_from, window_to, chunk_label)
     token = claimed_by or default_claim_token()
     total = len(chunks)
-    completed = skipped = lost = 0
+    completed = skipped = 0
+    lost_chunk_ids: list[str] = []
 
     with open_backfill_state(source.name, destination, dataset) as state:
         state.ensure_table()
@@ -251,8 +274,8 @@ def execute_backfill(
                 echo(f"{label}: already completed, skipping")
                 continue
             if not state.claim(backfill_id, chunk_id, claimed_by=token):
-                lost += 1
-                echo(f"{label}: claimed by another worker, moving on")
+                lost_chunk_ids.append(chunk_id)
+                echo(f"{label}: held by another worker, NOT run by this invocation")
                 continue
             state.mark_running(backfill_id, chunk_id, claimed_by=token)
             run_id = chunk_run_id(source.name, chunk_from, chunk_to)
@@ -274,10 +297,29 @@ def execute_backfill(
                     f"{label} failed: {summarize_error(exc)}. Completed chunks are recorded — "
                     f"re-run the same --from/--to/--chunk to resume."
                 ) from exc
+            except BaseException:
+                # KeyboardInterrupt / SystemExit skip the handler above. `running`
+                # sits outside the CAS target set, so a row abandoned there can
+                # never be reclaimed and the chunk is stranded for good. Demote it
+                # to `failed` — which a re-run does reclaim — then let the
+                # interrupt through untouched.
+                state.mark_failed(backfill_id, chunk_id, claimed_by=token)
+                raise
             _, records_loaded = record_counts_from_trace(getattr(pipeline, "last_trace", None))
             state.mark_completed(backfill_id, chunk_id, claimed_by=token, records_loaded=records_loaded)
             completed += 1
             echo(f"{label}: completed ({records_loaded if records_loaded is not None else '?'} records)")
+
+        # A chunk held elsewhere may have finished while this invocation worked
+        # through the rest of the window. Re-read once so `lost` means "still
+        # not covered by anyone" — the only thing worth denying a clean exit —
+        # rather than "was busy the moment I looked at it".
+        lost = len(lost_chunk_ids)
+        if lost_chunk_ids:
+            final_status = {row.chunk_id: row.status for row in state.fetch_chunks(backfill_id)}
+            covered = [c for c in lost_chunk_ids if final_status.get(c) == ChunkStatus.COMPLETED]
+            skipped += len(covered)
+            lost -= len(covered)
 
     return BackfillSummary(backfill_id=backfill_id, total=total, completed=completed, skipped=skipped, lost=lost)
 
@@ -322,6 +364,11 @@ def backfill(ctx: click.Context, source_name: str, window_from_raw: str, window_
     --from/--to/--chunk triple skips completed chunks, retries failed ones,
     and continues pending ones. Concurrent invocations coordinate via the
     state table — every chunk executes exactly once.
+
+    Exit code 0 means this invocation covered every chunk of the window
+    (completed here, or already completed by an earlier run). Chunks another
+    worker holds are reported and exit non-zero: they did not run here, so this
+    invocation cannot vouch for the window.
 
     Timestamps must carry an explicit timezone offset (naive inputs are
     rejected); the source's selected resources must declare an incremental
@@ -372,16 +419,30 @@ def backfill(ctx: click.Context, source_name: str, window_from_raw: str, window_
     except (BackfillUsageError, PreflightError, ProjectConfigError) as e:
         click.echo(click.style(f"Error: {e}", fg="red"), err=True)
         sys.exit(1)
-    except BackfillChunkError as e:
+    except (BackfillChunkError, BackfillStateError) as e:
         click.echo(click.style(f"Error: {e}", fg="red"), err=True)
         sys.exit(1)
 
+    tally = (
+        f"Backfill {summary.backfill_id}: {summary.completed} completed, {summary.skipped} skipped, "
+        f"{summary.lost} claimed elsewhere ({summary.total} chunks)"
+    )
     click.echo()
+    if summary.window_covered:
+        click.echo(click.style(tally, fg="green", bold=True))
+        return
+
+    # Chunks held by another worker never ran here, so this invocation cannot
+    # report the window as backfilled — green + exit 0 would tell an operator
+    # the window is covered when it may not be.
+    click.echo(click.style(tally, fg="yellow", bold=True))
     click.echo(
         click.style(
-            f"Backfill {summary.backfill_id}: {summary.completed} completed, {summary.skipped} skipped, "
-            f"{summary.lost} claimed elsewhere ({summary.total} chunks)",
-            fg="green",
-            bold=True,
-        )
+            f"Error: {summary.lost} of {summary.total} chunk(s) were held by another worker and did not run "
+            f"here, so this invocation did not cover the whole window. Re-run the same --from/--to/--chunk "
+            f"once the other worker has finished — it exits 0 only when every chunk is completed.",
+            fg="red",
+        ),
+        err=True,
     )
+    sys.exit(1)

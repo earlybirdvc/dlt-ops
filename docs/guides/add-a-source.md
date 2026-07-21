@@ -65,6 +65,8 @@ import pydantic
 
 
 class Order(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid")
+
     id: int
     customer_email: str | None  # nullable: guest checkouts carry no account
     total_cents: int
@@ -101,7 +103,8 @@ def orders_source():
 **Three declarations do the structural work:**
 
 - **The Pydantic model is the schema.** `columns=Order` gives dlt typed destination columns at load time instead of type inference, and the [reconciler](../concepts/reconciler.md) later diffs the live schema against it — every resource must declare one.
-- **The resource carries no `schema_contract`**, so the runtime auto-applies the canonical freeze contract (`{"tables": "evolve", "columns": "freeze", "data_type": "freeze"}`).
+- **`extra="forbid"` is what makes the model a contract.** dlt reads it as `schema_contract` `columns: "freeze"`, so a field the API starts sending that `Order` does not declare fails the run instead of being dropped in silence. Leave it off and Pydantic's default applies — dlt derives `columns: "discard_value"` and you lose the column without being told. The [`pydantic_model_forbids_extra`](../configuration/rules.md#pydantic_model_forbids_extra) rule fails `validate` on models that omit it.
+- **The resource carries no `schema_contract` kwarg**, and needs none: the contract dlt derives from the model above already is the canonical freeze contract (`{"tables": "evolve", "columns": "freeze", "data_type": "freeze"}`). A resource whose `columns=` is a plain dict, or that declares no `columns=` at all, gets that literal applied by the runtime instead.
 - **The resource lives in the source's own module** because nothing else shares it — a resource used by several sources moves to `my_pipeline/resource/` instead.
 
 ## 3. Validate — and read the refusal

@@ -24,12 +24,15 @@ from dlt_ops import (
 )
 from dlt_ops.cli.cli import cli
 from dlt_ops.config import ProjectConfig
+from dlt_ops.discovery import validator as validator_mod
 from dlt_ops.discovery.validator import (
     RuleAssembly,
+    RuleProviderFailure,
     check_unknown_rule_ids,
     load_rule_exemptions,
     load_rule_specs,
     resolve_rules,
+    rule_provider_errors,
     rules_config_errors,
 )
 from dlt_ops.discovery.validators import CORE_RULES
@@ -49,6 +52,7 @@ EXPECTED_CORE_IDS = {
     "no_resource_overlap",
     "json_hints_for_dict_fields",
     "pydantic_columns_required",
+    "pydantic_model_forbids_extra",
     "schema_contract_declared",
     "explicit_resource_name_multi_source",
     "cursor_not_load_timestamp",
@@ -59,7 +63,15 @@ EXPECTED_CORE_IDS = {
     "assertion_config_valid",
     "assertion_columns_exist",
     "assertion_predicate_resolvable",
+    "incremental_cursor_required",
 }
+
+# Core rules that ship OFF. A missing incremental cursor is a policy, not a
+# provable defect — a full refresh is legitimate and nothing the package sees
+# separates it from an oversight — so adopting the rule is a decision rather
+# than an upgrade surprise. Locked here so a rule can never quietly switch
+# default in either direction.
+EXPECTED_OPT_IN_CORE_IDS = {"incremental_cursor_required"}
 
 
 @pytest.fixture(autouse=True)
@@ -105,6 +117,11 @@ def _dummy_rule_validator(ctx: ValidationContext) -> list[ValidationError]:
 def dummy_rules() -> tuple[RuleSpec, ...]:
     """Entry-point provider used by the plugin-group tests."""
     return (RuleSpec(rule_id="dummy_rule", validator=_dummy_rule_validator, plugin="acme_rules"),)
+
+
+def exploding_rules() -> tuple[RuleSpec, ...]:
+    """Entry-point provider that raises on enumeration (loads fine, then blows up)."""
+    raise RuntimeError("provider exploded while enumerating rules")
 
 
 # --- Neutral project fixtures ---
@@ -184,11 +201,15 @@ class TestCoreRuleRegistry:
         assert {spec.rule_id for spec in CORE_RULES} == EXPECTED_CORE_IDS
         assert len(CORE_RULES) == len(EXPECTED_CORE_IDS)
 
-    def test_every_core_rule_is_core_owned_default_on_and_callable(self):
+    def test_every_core_rule_is_core_owned_and_callable(self):
         for spec in CORE_RULES:
             assert spec.plugin == "core"
-            assert spec.default_on is True
             assert callable(spec.validator)
+
+    def test_default_state_matches_the_locked_opt_in_list(self):
+        for spec in CORE_RULES:
+            expected = spec.rule_id not in EXPECTED_OPT_IN_CORE_IDS
+            assert spec.default_on is expected, f"{spec.rule_id} changed its shipped default"
 
     def test_import_error_surfacing_is_not_a_rule(self):
         """A module that cannot import cannot run — always-on infrastructure,
@@ -219,16 +240,23 @@ class TestResolveRules:
     def _assembly(self) -> RuleAssembly:
         return RuleAssembly(specs=CORE_RULES, failures=())
 
-    def test_defaults_all_on(self):
+    def test_defaults_follow_each_rule_s_registered_default(self):
         resolved = resolve_rules(ProjectConfig(), self._assembly())
         assert set(resolved) == EXPECTED_CORE_IDS
-        assert all(resolved.values())
+        assert {rule_id for rule_id, on in resolved.items() if not on} == EXPECTED_OPT_IN_CORE_IDS
+
+    def test_explicit_true_enables_an_opt_in_rule(self):
+        """The opt-in half of the knob: default-off rules turn on from config."""
+        config = ProjectConfig(rules={"incremental_cursor_required": True})
+        resolved = resolve_rules(config, self._assembly())
+        assert resolved["incremental_cursor_required"] is True
 
     def test_explicit_false_disables_exactly_that_rule(self):
         config = ProjectConfig(rules={"schedule_required": False})
         resolved = resolve_rules(config, self._assembly())
         assert resolved["schedule_required"] is False
-        assert all(on for rule_id, on in resolved.items() if rule_id != "schedule_required")
+        off = {rule_id for rule_id, on in resolved.items() if not on}
+        assert off == EXPECTED_OPT_IN_CORE_IDS | {"schedule_required"}
 
     def test_explicit_true_is_a_no_op(self):
         resolved = resolve_rules(ProjectConfig(rules={"schedule_required": True}), self._assembly())
@@ -494,6 +522,86 @@ class TestPluginValidatorGroup:
         assert any(e.field == "config_section" and e.is_warning for e in errors)
 
 
+class TestRuleProviderFailuresSurface:
+    """A provider that contributes no rules must be reported by every `validate`
+    run. It used to be recorded only into `RuleAssembly.failures`, which nothing
+    but `--show-resolved-rules` read — and that path returns before validation
+    ever runs, so a normal run checked less than it claimed and said nothing."""
+
+    EXPLODING = "tests.test_validators:exploding_rules"
+    MISSING = "dltx_missing_rules_mod:provider"
+
+    def _provider_errors(self, errors: list[ValidationError]) -> list[ValidationError]:
+        return [e for e in errors if e.source_name == "dlt_ops.validators"]
+
+    def test_raising_provider_surfaces_in_a_normal_validate_run(self, extra_entry_points, make_project):
+        extra_entry_points("validators", "acme_rules", self.EXPLODING, "acme-rules-dist")
+        errors = validate_sources(make_project())
+
+        reported = self._provider_errors(errors)
+        assert len(reported) == 1, errors
+        assert reported[0].field == "validators.acme_rules"
+        assert "provider exploded" in reported[0].message
+
+    def test_provider_failure_is_an_error_not_a_filtered_warning(self, extra_entry_points, make_project):
+        """Warnings are dropped from every non-`--strict` run, so a warning here
+        would be invisible in exactly the run this must not pass silently."""
+        extra_entry_points("validators", "acme_rules", self.EXPLODING, "acme-rules-dist")
+        reported = self._provider_errors(validate_sources(make_project(), strict=False))
+
+        assert reported and all(not e.is_warning for e in reported)
+
+    def test_unloadable_provider_surfaces_too(self, extra_entry_points, make_project):
+        """The load-failure twin of the raising provider: same soft-fail record,
+        same reporting path."""
+        extra_entry_points("validators", "broken_rules", self.MISSING, "acme-broken")
+        reported = self._provider_errors(validate_sources(make_project()))
+
+        assert [e.field for e in reported] == ["validators.broken_rules"]
+        assert "ModuleNotFoundError" in reported[0].message
+
+    def test_validate_cli_fails_when_a_provider_contributed_nothing(self, extra_entry_points, make_project):
+        extra_entry_points("validators", "acme_rules", self.EXPLODING, "acme-rules-dist")
+        root = make_project()
+        result = CliRunner().invoke(cli, ["--root", str(root), "pipeline", "validate"])
+
+        assert result.exit_code == 1, result.output
+        assert "All sources validated successfully" not in result.output
+        assert "acme_rules" in result.output
+
+    def test_core_provider_failure_is_fatal(self, make_project, monkeypatch):
+        """Core owns the baseline rule set; a run that lost it proves nothing."""
+        assembly = RuleAssembly(
+            specs=(),
+            failures=(RuleProviderFailure(provider="core", error="ImportError: core is broken"),),
+        )
+        monkeypatch.setattr(validator_mod, "load_rule_specs", lambda: assembly)
+        errors = validate_sources(make_project())
+
+        fatal = [e for e in self._provider_errors(errors) if not e.is_warning]
+        assert [e.field for e in fatal] == ["validators.core"]
+        assert "core is broken" in fatal[0].message
+
+    def test_healthy_environment_reports_no_provider_errors(self, make_project):
+        """Guard against a false positive: an optional extra that is merely
+        absent returns no rules and is not a failure."""
+        assert self._provider_errors(validate_sources(make_project(), strict=True)) == []
+
+    def test_rule_provider_errors_is_a_pure_projection_of_failures(self):
+        assembly = RuleAssembly(
+            specs=(),
+            failures=(
+                RuleProviderFailure(provider="acme", error="RuntimeError: nope"),
+                RuleProviderFailure(provider="other", error="duplicate rule id 'x'; skipped"),
+            ),
+        )
+        errors = rule_provider_errors(assembly)
+
+        assert [e.field for e in errors] == ["validators.acme", "validators.other"]
+        assert all(e.source_name == "dlt_ops.validators" for e in errors)
+        assert rule_provider_errors(RuleAssembly(specs=(), failures=())) == []
+
+
 class TestShowResolvedRules:
     """pipeline validate --show-resolved-rules: every rule, on/off, origin."""
 
@@ -727,25 +835,6 @@ class TestConfigValidators:
         config = {"sources": {"events_api": {"dlt_ops": {"schedule": "@daily"}}}}
         assert validate_schedules(_config_ctx(config)) == []
 
-    def test_airflow_var_missing_for_secrets_source_fails(self):
-        from dlt_ops.discovery.validators.config import validate_airflow_vars
-
-        config = {"sources": {"events_api": {"dlt_ops": {}}}}
-        errors = validate_airflow_vars(_config_ctx(config, source_fn=_secrets_source))
-        assert len(errors) == 1
-        assert "airflow_var" in errors[0].message
-
-    def test_airflow_var_present_passes(self):
-        from dlt_ops.discovery.validators.config import validate_airflow_vars
-
-        config = {"sources": {"events_api": {"dlt_ops": {"airflow_var": "EVENTS_API_SECRETS"}}}}
-        assert validate_airflow_vars(_config_ctx(config, source_fn=_secrets_source)) == []
-
-    def test_airflow_var_not_required_without_secrets(self):
-        from dlt_ops.discovery.validators.config import validate_airflow_vars
-
-        assert validate_airflow_vars(_config_ctx({"sources": {"events_api": {"dlt_ops": {}}}})) == []
-
     def test_missing_decorator_name_fails(self):
         from dlt_ops.discovery.validators.config import validate_decorator_names
 
@@ -783,6 +872,44 @@ class TestConfigValidators:
 
         config = {"sources": {"events_api": {}, "data_writer": {}, "extract": {}}}
         assert validate_orphan_sections(_config_ctx(config)) == []
+
+
+class TestAirflowVarRequiredBody:
+    """The `airflow_var_required` rule body, which lives in the Airflow plugin.
+
+    Tested here because the ValidationContext helpers live here; the rule's
+    registration and end-to-end behaviour are in tests/test_airflow_runtime.py.
+    Ungated on purpose — the plugin's validator module is importable without
+    Airflow, and that property is what keeps a bare install's `plugins doctor`
+    green.
+    """
+
+    def test_airflow_var_missing_for_secrets_source_fails(self):
+        from dlt_ops.airflow.validators import validate_airflow_vars
+
+        config = {"sources": {"events_api": {"dlt_ops": {}}}}
+        errors = validate_airflow_vars(_config_ctx(config, source_fn=_secrets_source))
+        assert len(errors) == 1
+        assert "airflow_var" in errors[0].message
+
+    def test_airflow_var_present_passes(self):
+        from dlt_ops.airflow.validators import validate_airflow_vars
+
+        config = {"sources": {"events_api": {"dlt_ops": {"airflow_var": "EVENTS_API_SECRETS"}}}}
+        assert validate_airflow_vars(_config_ctx(config, source_fn=_secrets_source)) == []
+
+    def test_airflow_var_not_required_without_secrets(self):
+        from dlt_ops.airflow.validators import validate_airflow_vars
+
+        assert validate_airflow_vars(_config_ctx({"sources": {"events_api": {"dlt_ops": {}}}})) == []
+
+    def test_core_validators_do_not_re_export_the_rule(self):
+        """Core owns no orchestrator rule — the boundary CORE_RULES claims."""
+        import dlt_ops.discovery.validators as core_validators
+        import dlt_ops.discovery.validators.config as core_config
+
+        assert not hasattr(core_validators, "validate_airflow_vars")
+        assert not hasattr(core_config, "validate_airflow_vars")
 
 
 # --- destination_capability ---
@@ -1219,6 +1346,136 @@ class TestColumnsPydanticCheck:
         assert "Pydantic model" in error.message
 
 
+# --- pydantic_model_forbids_extra ---
+
+
+class TestPydanticModelForbidsExtra:
+    """The rule reads the contract dlt derived from the model rather than
+    re-deriving it, so these cases run real `@dlt.resource` decorations and
+    assert against dlt 1.29's actual mapping of `extra` -> column mode."""
+
+    def _ctx(self, tmp_path, resource) -> ValidationContext:
+        instance = types.SimpleNamespace(resources={"events": resource})
+        source = SourceInfo(
+            name="my_api",
+            pipeline_name="my_pipe",
+            path=tmp_path,
+            function_name="my_api_source",
+            source_fn=lambda: instance,
+            resources=("events",),
+            module_stem="my_api",
+        )
+        return ValidationContext(sources={"my_api": source}, config={}, project_root=tmp_path)
+
+    def _resource(self, tmp_path, **kwargs):
+        import dlt
+
+        @dlt.resource(name="events", **kwargs)
+        def events():
+            yield [{"id": 1}]
+
+        return events
+
+    def _errors(self, tmp_path, **kwargs):
+        from dlt_ops.discovery.validators.schema import validate_pydantic_model_forbids_extra
+
+        return validate_pydantic_model_forbids_extra(self._ctx(tmp_path, self._resource(tmp_path, **kwargs)))
+
+    def test_model_leaving_extra_unset_is_an_error(self, tmp_path):
+        class Loose(pydantic.BaseModel):
+            id: int
+
+        errors = self._errors(tmp_path, columns=Loose)
+        assert len(errors) == 1
+        assert errors[0].field == "resource.events"
+
+    def test_error_names_the_model_and_the_exact_line_to_add(self, tmp_path):
+        class Loose(pydantic.BaseModel):
+            id: int
+
+        message = self._errors(tmp_path, columns=Loose)[0].message
+        assert "Loose" in message
+        assert 'model_config = pydantic.ConfigDict(extra="forbid")' in message
+        assert "discard_value" in message
+
+    def test_model_forbidding_extra_passes(self, tmp_path):
+        class Strict(pydantic.BaseModel):
+            model_config = pydantic.ConfigDict(extra="forbid")
+            id: int
+
+        assert self._errors(tmp_path, columns=Strict) == []
+
+    def test_model_allowing_extra_passes(self, tmp_path):
+        """`extra="allow"` derives the evolve contract — the opt-in route, not
+        silent loss. Whether the source may opt in is `schema_contract_declared`'s
+        business, not this rule's."""
+
+        class Evolving(pydantic.BaseModel):
+            model_config = pydantic.ConfigDict(extra="allow")
+            id: int
+
+        assert self._errors(tmp_path, columns=Evolving) == []
+
+    def test_explicit_extra_ignore_is_an_error(self, tmp_path):
+        """Spelling the silent drop out loud is still a silent drop."""
+
+        class Ignoring(pydantic.BaseModel):
+            model_config = pydantic.ConfigDict(extra="ignore")
+            id: int
+
+        assert len(self._errors(tmp_path, columns=Ignoring)) == 1
+
+    def test_inherited_model_config_is_honored(self, tmp_path):
+        """Pydantic merges `model_config` up the MRO and dlt reads the merged
+        value, so a strict base is enough."""
+
+        class StrictBase(pydantic.BaseModel):
+            model_config = pydantic.ConfigDict(extra="forbid")
+
+        class Child(StrictBase):
+            id: int
+
+        assert self._errors(tmp_path, columns=Child) == []
+
+    def test_explicit_canonical_contract_rescues_a_loose_model(self, tmp_path):
+        """dlt lets an explicit `schema_contract=` override the model's `extra`,
+        so this resource does freeze at run time and must not be flagged."""
+
+        class Loose(pydantic.BaseModel):
+            id: int
+
+        from dlt_ops.schema_contracts import CANONICAL_SCHEMA_CONTRACT
+
+        errors = self._errors(tmp_path, columns=Loose, schema_contract=dict(CANONICAL_SCHEMA_CONTRACT))
+        assert errors == []
+
+    def test_dict_columns_resource_is_not_this_rules_business(self, tmp_path):
+        """dlt derives no contract from a dict `columns=`; the runner supplies
+        the canonical literal for those at run time."""
+        assert self._errors(tmp_path, columns={"id": {"data_type": "bigint"}}) == []
+
+    def test_resource_without_columns_is_not_flagged(self, tmp_path):
+        assert self._errors(tmp_path) == []
+
+    def test_uninstantiable_source_is_skipped_not_failed(self, tmp_path):
+        from dlt_ops.discovery.validators.schema import validate_pydantic_model_forbids_extra
+
+        def boom():
+            raise RuntimeError("cannot build")
+
+        source = SourceInfo(
+            name="broken",
+            pipeline_name="my_pipe",
+            path=tmp_path,
+            function_name="broken_source",
+            source_fn=boom,
+            resources=(),
+            module_stem="broken",
+        )
+        ctx = ValidationContext(sources={"broken": source}, config={}, project_root=tmp_path)
+        assert validate_pydantic_model_forbids_extra(ctx) == []
+
+
 # --- schema_contract_declared ---
 
 
@@ -1536,6 +1793,171 @@ class TestSchemaContractValidator:
         assert duplicate_errors[0].source_name == "src_a|src_b"
 
 
+# --- incremental_cursor_required ---
+
+
+class TestIncrementalCursorRequiredValidator:
+    """The gap its sibling leaves: a resource with NO cursor at all.
+
+    `cursor_not_load_timestamp` flags a wrong cursor, and only when
+    `load_timestamp_column` is set — so a resource that full-refreshes on every
+    scheduled run passed validate silently. Opt-in, because a full refresh is a
+    legitimate choice the package cannot tell apart from an oversight.
+    """
+
+    @staticmethod
+    def _source(*, cursor: bool):
+        import datetime as dt
+
+        import dlt
+
+        def build():
+            if cursor:
+
+                @dlt.resource(name="events")
+                def events(ts=dlt.sources.incremental("updated_at", initial_value=dt.datetime(2024, 1, 1))):
+                    yield {"id": 1, "updated_at": dt.datetime(2024, 6, 1)}
+            else:
+
+                @dlt.resource(name="events")
+                def events():
+                    yield {"id": 1}
+
+            return dlt.source(lambda: events, name="cursor_probe")()
+
+        return build
+
+    def _ctx(self, tmp_path: Path, *, cursor: bool, schedule: Schedule = Schedule.DAILY) -> ValidationContext:
+        info = SourceInfo(
+            name="cursor_probe",
+            pipeline_name="probe",
+            path=tmp_path / "probe",
+            function_name="cursor_probe_source",
+            resources=("events",),
+            module_stem="cursor_probe",
+            config=SourceConfig(schedule=schedule),
+            source_fn=self._source(cursor=cursor),
+        )
+        return ValidationContext(sources={"cursor_probe": info}, config={}, project_root=tmp_path)
+
+    def _validate(self, ctx: ValidationContext):
+        from dlt_ops.discovery.validators.platform_rules import validate_incremental_cursor_required
+
+        return validate_incremental_cursor_required(ctx)
+
+    def test_missing_cursor_on_a_scheduled_source_is_reported(self, tmp_path):
+        errors = self._validate(self._ctx(tmp_path, cursor=False))
+
+        assert len(errors) == 1
+        assert errors[0].source_name == "cursor_probe"
+        assert errors[0].field == "incremental.events"
+        assert "no incremental cursor" in errors[0].message
+        assert "re-extracts it in full" in errors[0].message
+
+    def test_it_is_an_error_not_a_warning(self, tmp_path):
+        """validate_sources drops warnings outside --strict, so a warning here
+        would be invisible in the run that matters."""
+        assert all(not e.is_warning for e in self._validate(self._ctx(tmp_path, cursor=False)))
+
+    def test_declared_cursor_passes(self, tmp_path):
+        assert self._validate(self._ctx(tmp_path, cursor=True)) == []
+
+    def test_manual_schedule_is_out_of_scope(self, tmp_path):
+        """The harm is a full refresh repeating on a cadence; an on-demand
+        source re-reads everything when someone asks it to."""
+        assert self._validate(self._ctx(tmp_path, cursor=False, schedule=Schedule.MANUAL)) == []
+
+    def test_source_without_parsed_config_is_skipped(self, tmp_path):
+        info = SourceInfo(
+            name="no_config",
+            pipeline_name="probe",
+            path=tmp_path / "probe",
+            function_name="no_config_source",
+            resources=("events",),
+            module_stem="no_config",
+            source_fn=self._source(cursor=False),
+        )
+        ctx = ValidationContext(sources={"no_config": info}, config={}, project_root=tmp_path)
+        assert self._validate(ctx) == []
+
+    def test_uninstantiable_source_is_skipped_not_flagged(self, tmp_path):
+        """Instantiation failure is another rule's finding; guessing "no cursor"
+        from it would be a false positive."""
+
+        def boom():
+            raise RuntimeError("cannot instantiate")
+
+        info = SourceInfo(
+            name="boom_api",
+            pipeline_name="probe",
+            path=tmp_path / "probe",
+            function_name="boom_source",
+            resources=("events",),
+            module_stem="boom_api",
+            config=SourceConfig(schedule=Schedule.DAILY),
+            source_fn=boom,
+        )
+        ctx = ValidationContext(sources={"boom_api": info}, config={}, project_root=tmp_path)
+        assert self._validate(ctx) == []
+
+    def test_rule_ships_off_and_turns_on_from_config(self, tmp_path, make_project):
+        """End-to-end through validate_sources: silent by default, loud on opt-in."""
+        source = dedent("""
+            import dlt
+            import pydantic
+
+            class Row(pydantic.BaseModel):
+                model_config = pydantic.ConfigDict(extra="forbid")
+                id: int
+
+            @dlt.resource(name="dim_rows", columns=Row)
+            def dim_rows():
+                yield {"id": 1}
+
+            @dlt.source(name="dim_api")
+            def dim_api_source():
+                return dim_rows
+        """)
+        base = '[dlt_ops]\ndefault_destination = "duckdb"\ndefault_dataset = "raw"\n\n[sources.dim_api.dlt_ops]\nschedule = "@daily"\n'
+        files = {"dim/source/dim_api.py": source}
+
+        off = validate_sources(make_project(config=base, files=files, name="off"))
+        assert [e for e in off if e.field.startswith("incremental.")] == []
+
+        on_config = base + "\n[dlt_ops.rules]\nincremental_cursor_required = true\n"
+        on = validate_sources(make_project(config=on_config, files=files, name="on"))
+        assert [e.field for e in on if e.field.startswith("incremental.")] == ["incremental.dim_rows"]
+
+    def test_exemption_records_an_intended_full_refresh(self, tmp_path, make_project):
+        """The escape hatch the message names, with its mandatory reason."""
+        source = dedent("""
+            import dlt
+            import pydantic
+
+            class Row(pydantic.BaseModel):
+                model_config = pydantic.ConfigDict(extra="forbid")
+                id: int
+
+            @dlt.resource(name="dim_rows", columns=Row)
+            def dim_rows():
+                yield {"id": 1}
+
+            @dlt.source(name="dim_api")
+            def dim_api_source():
+                return dim_rows
+        """)
+        config = (
+            '[dlt_ops]\ndefault_destination = "duckdb"\ndefault_dataset = "raw"\n\n'
+            "[dlt_ops.rules]\nincremental_cursor_required = true\n\n"
+            '[sources.dim_api.dlt_ops]\nschedule = "@daily"\n\n'
+            "[sources.dim_api.dlt_ops.rule_exemptions]\n"
+            'incremental_cursor_required = "small dimension table; a full refresh is intended"\n'
+        )
+        errors = validate_sources(make_project(config=config, files={"dim/source/dim_api.py": source}, name="exempt"))
+
+        assert [e for e in errors if e.field.startswith("incremental.")] == []
+
+
 # --- cursor_not_load_timestamp ---
 
 
@@ -1597,3 +2019,70 @@ class TestCursorNotLoadTimestampValidator:
         ctx = _make_ctx(tmp_path, config=self.CONFIG)
         self._write(ctx, 'import dlt\n\ncur = dlt.sources.incremental("loaded_at")\n')
         assert validate_cursor_not_load_timestamp(ctx) == []
+
+    def test_padded_configured_column_still_fires(self, tmp_path):
+        """A padded TOML value must not disarm the rule.
+
+        `load_timestamp_column = " ingested_at "` is the column `ingested_at`
+        everywhere else — the runner strips it before stamping and the
+        reconciler strips it before ignoring it. Comparing the raw padded
+        string here matches no source literal, so the rule would silently pass
+        a pipeline that cursors on the stamp column.
+        """
+        from dlt_ops.discovery.validators.platform_rules import validate_cursor_not_load_timestamp
+
+        ctx = _make_ctx(tmp_path, config={"dlt_ops": {"load_timestamp_column": "  ingested_at  "}})
+        self._write(ctx, 'import dlt\n\ncur = dlt.sources.incremental("ingested_at")\n')
+        errors = validate_cursor_not_load_timestamp(ctx)
+        assert len(errors) == 1
+        assert "'ingested_at'" in errors[0].message
+
+    def test_non_string_configured_value_is_inert(self, tmp_path):
+        """A hand-authored non-string value reads as off, never as a column name."""
+        from dlt_ops.discovery.validators.platform_rules import validate_cursor_not_load_timestamp
+
+        ctx = _make_ctx(tmp_path, config={"dlt_ops": {"load_timestamp_column": 42}})
+        self._write(ctx, 'import dlt\n\ncur = dlt.sources.incremental("ingested_at")\n')
+        assert validate_cursor_not_load_timestamp(ctx) == []
+
+
+class TestLoadTimestampColumnReader:
+    """One key, one reading — the reader every consumer layer shares.
+
+    The rule, the runner's row stamper, and the reconciler's ignored-column
+    set all resolve `[dlt_ops] load_timestamp_column` through this function.
+    Divergence between them is silent: a stamped column the rule doesn't
+    recognise, or an ignored column that doesn't match what landed.
+    """
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("loaded_at", "loaded_at"),
+            ("  loaded_at  ", "loaded_at"),
+            ("\tloaded_at\n", "loaded_at"),
+            ("", None),
+            ("   ", None),
+            (None, None),
+            (42, None),
+            (True, None),
+            (["loaded_at"], None),
+        ],
+        ids=["plain", "padded", "tabbed", "empty", "blank", "absent", "int", "bool", "list"],
+    )
+    def test_normalizes_every_shape(self, raw, expected):
+        from dlt_ops.discovery.models import resolve_load_timestamp_column
+
+        assert resolve_load_timestamp_column(raw) == expected
+
+    def test_reconciler_and_validator_agree_on_a_padded_value(self):
+        """The two config shapes (ProjectConfig vs raw dict) read identically."""
+        from dlt_ops.discovery.validators.platform_rules import _configured_load_timestamp_column
+        from dlt_ops.reconciler.common import configured_load_timestamp_column
+
+        raw = {"dlt_ops": {"load_timestamp_column": "  loaded_at  "}}
+        project_config = ProjectConfig(raw=raw["dlt_ops"])
+        ctx = ValidationContext(sources={}, config=raw, project_root=Path("/tmp/nowhere"))
+
+        assert _configured_load_timestamp_column(ctx) == "loaded_at"
+        assert configured_load_timestamp_column(project_config) == "loaded_at"

@@ -1,7 +1,7 @@
 [project]
 name = "dlt-ops"
 dynamic = ["version"]
-description = "Reusable extensions for dlt (Data Load Tool) pipelines"
+description = "Run many dlt sources in production: enforced layout, validation, data gates, and a runs ledger"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -10,20 +10,20 @@ maintainers = [{ name = "Nikita Yurasov", email = "nikita@earlybird.com" }]
 dependencies = [
     # Floor only, never an upper bound — users own their dlt version. The floor
     # is the oldest CI-verified minor (ci/dlt-versions.txt); the verified matrix
-    # and the cleanup guard for unverified minors are documented in COMPATIBILITY.md.
+    # is documented in COMPATIBILITY.md.
     "dlt>=1.27",
     "click",
     "attrs",
     "pendulum",
     "sqlglot",
-    # Hard dependency by design (CONVENTIONS Rule 14 — `columns=` models are
-    # mandatory): the validator framework, pydantic_fields helpers, and the
-    # init scaffold all import it unconditionally.
+    # Hard dependency by design (`columns=` models are mandatory): the validator
+    # framework, pydantic_fields helpers, and the init scaffold all import it
+    # unconditionally.
     "pydantic",
 ]
 
 [project.optional-dependencies]
-airflow = ["apache-airflow>=2.9"] # floor = oldest version the adapter is CI-tested against
+airflow = ["apache-airflow>=2.9"] # declared floor; the non-blocking CI lane resolves the newest 2.x
 bigquery = ["dlt[bigquery]"]
 duckdb = ["dlt[duckdb]"]
 postgres = ["dlt[postgres]"]

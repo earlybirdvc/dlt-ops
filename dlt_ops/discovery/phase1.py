@@ -20,6 +20,7 @@ escapes it.
 
 import ast
 import logging
+from collections.abc import Container
 from pathlib import Path
 from typing import Any
 
@@ -30,22 +31,36 @@ from dlt_ops.discovery.models import Schedule, SourceConfig, SourceInfo
 
 logger = logging.getLogger(__name__)
 
-EXCLUDED_DIRS = {"__pycache__", "logs", ".dlt", "common"}
-
 # Terminal name of the package's checkpoint decorator, matched statically.
 _CHECKPOINT_DECORATOR_NAME = "with_checkpoints"
 
 
 def _is_valid_source_dir(subdir: Path) -> bool:
-    """Check if a directory contains a valid dlt source."""
+    """Check if a directory contains a valid dlt source.
+
+    Two structural requirements decide it, and nothing else: the directory name
+    must not start with ``.`` or ``_``, and it must hold a ``SOURCE_DIR`` with
+    at least one non-underscore ``.py``. No name is excluded — a pipeline
+    directory called ``common`` or ``logs`` is as discoverable as any other.
+
+    Every rejected directory is logged at DEBUG with its reason. A directory an
+    operator believes is a pipeline, silently absent from ``pipeline list``, is
+    the hardest discovery failure to diagnose, and this is the only place that
+    knows why.
+    """
     if not subdir.is_dir():
         return False
-    if subdir.name.startswith((".", "_")) or subdir.name in EXCLUDED_DIRS:
+    if subdir.name.startswith((".", "_")):
+        logger.debug(f"Not a pipeline dir: {subdir.name} — names starting with '.' or '_' are skipped")
         return False
     source_dir = subdir / SOURCE_DIR
     if not source_dir.is_dir():
+        logger.debug(f"Not a pipeline dir: {subdir.name} — no {SOURCE_DIR}/ subdirectory")
         return False
-    return any(f.suffix == ".py" and not f.name.startswith("_") for f in source_dir.iterdir())
+    if not any(f.suffix == ".py" and not f.name.startswith("_") for f in source_dir.iterdir()):
+        logger.debug(f"Not a pipeline dir: {subdir.name} — {SOURCE_DIR}/ holds no non-underscore .py file")
+        return False
+    return True
 
 
 def _is_dlt_attribute(node: ast.AST, attr: str) -> bool:
@@ -109,12 +124,14 @@ def _scan_module(py_file: Path) -> _ModuleScan:
     called or not.
 
     Raises:
-        ValueError: the file cannot be read or parsed.
+        ValueError: the file cannot be read or parsed. The message carries the
+            bare reason (``SyntaxError: ...``) so call sites can frame it —
+            ``discover`` turns it into a ``SourceInfo.import_error``.
     """
     try:
         tree = ast.parse(py_file.read_text(encoding="utf-8"))
     except (OSError, SyntaxError) as e:
-        raise ValueError(f"Failed to parse {py_file.name}: {e}") from e
+        raise ValueError(f"{type(e).__name__}: {e}") from e
 
     sources: list[tuple[str, str | None]] = []
     for node in tree.body:
@@ -177,7 +194,11 @@ def _parse_source_config(config: dict[str, Any], config_section: str) -> SourceC
     """Parse SourceConfig from config.toml section.
 
     All custom config keys are under [sources.X.dlt_ops]:
-    - schedule, destination, dataset, airflow_var, airflow_var_key
+    - schedule, destination, dataset, airflow_var
+
+    Only keys core itself acts on are parsed here (plus ``airflow_var``, which
+    the CLI displays). Plugin-owned keys stay unparsed: a backend reads its own
+    trigger keys off the raw ext table, so core never has to know them.
     """
     sources_config = config.get("sources", {})
     section = sources_config.get(config_section)
@@ -212,13 +233,34 @@ def _parse_source_config(config: dict[str, Any], config_section: str) -> SourceC
         destination=ext.get("destination"),
         dataset=ext.get("dataset"),
         airflow_var=ext.get("airflow_var"),
-        airflow_var_key=ext.get("airflow_var_key", "api_secret_key"),
         schema_contract_evolve_reason=ext.get("schema_contract_evolve_reason"),
         injected_columns=injected_columns,
     )
 
 
-def discover(project_root: Path) -> dict[str, SourceInfo]:
+def _unloadable_record(subdir: Path, py_file: Path, reason: str, taken: Container[str]) -> SourceInfo:
+    """Placeholder for a source module that cannot be read or parsed.
+
+    A module that does not parse declares no ``@dlt.source``, so its config
+    section is unknowable; the file stem is the best guess and the one
+    ``module_name_matches_section`` already expects. ``function_name`` stays
+    empty — nothing may call it, because ``import_error`` keeps the record out
+    of Phase 2's import path and out of every ``is_introspected`` consumer.
+    """
+    name = py_file.stem if py_file.stem not in taken else f"{subdir.name}.{py_file.stem}"
+    return SourceInfo(
+        name=name,
+        pipeline_name=subdir.name,
+        path=subdir,
+        function_name="",
+        resources=(),
+        module_stem=py_file.stem,
+        module_path=py_file,
+        import_error=f"module could not be parsed: {reason}",
+    )
+
+
+def discover(project_root: Path, *, include_unloadable: bool = False) -> dict[str, SourceInfo]:
     """Discover dlt sources with a pure AST scan — zero project-code imports.
 
     Requirements for a source to be discovered:
@@ -228,12 +270,19 @@ def discover(project_root: Path) -> dict[str, SourceInfo]:
 
     Each source is keyed by its config_section: the explicit
     ``@dlt.source(name=...)`` value, or the function name minus its
-    ``_source`` suffix. Unparseable files are skipped with a warning;
-    siblings are unaffected.
+    ``_source`` suffix. A file that cannot be read or parsed is logged and
+    skipped; siblings are unaffected.
 
     Args:
         project_root: Path to the project root (holds .dlt/config.toml and
             one subdirectory per pipeline)
+        include_unloadable: Also return a placeholder record per source module
+            that could not be read or parsed, carrying the reason as
+            ``import_error`` so ``validate`` reports it through the same
+            always-on import-error path a module that raises at import takes.
+            Off by default: the parse-free consumers (``pipeline list``, the
+            orchestrator DAG factory) list runnable sources, and a file that
+            does not parse is not one.
 
     Returns:
         Dict mapping source name (config_section) to a Phase-1 SourceInfo
@@ -244,6 +293,7 @@ def discover(project_root: Path) -> dict[str, SourceInfo]:
     """
     config = load_raw_config(project_root)
     sources: dict[str, SourceInfo] = {}
+    unloadable: list[tuple[Path, Path, str]] = []
 
     for subdir in sorted(project_root.iterdir()):
         if not _is_valid_source_dir(subdir):
@@ -259,6 +309,7 @@ def discover(project_root: Path) -> dict[str, SourceInfo]:
                 scan = _scan_module(py_file)
             except ValueError as e:
                 logger.warning(f"Skipping {py_file.name}: {e}")
+                unloadable.append((subdir, py_file, str(e)))
                 continue
 
             for function_name, decorator_name in scan.sources:
@@ -283,5 +334,12 @@ def discover(project_root: Path) -> dict[str, SourceInfo]:
                     module_path=py_file,
                     uses_checkpoints=scan.uses_checkpoints or shared_uses_checkpoints,
                 )
+
+    # Merged last so the stem-vs-pipeline key choice sees every real source,
+    # and a broken sibling can never displace one that parsed.
+    if include_unloadable:
+        for subdir, py_file, reason in unloadable:
+            record = _unloadable_record(subdir, py_file, reason, sources)
+            sources[record.name] = record
 
     return sources

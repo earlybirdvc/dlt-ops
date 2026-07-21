@@ -1,4 +1,19 @@
-"""CheckpointManager for mid-run checkpoint persistence."""
+"""CheckpointManager for mid-run checkpoint persistence.
+
+Resume state is a gate, not observability, so it sits on the fail-hard side of
+the failure-semantics contract alongside ``assertions/quarantine.py`` and
+opposite ``runs/writer.py``: **reading or finalizing it never degrades
+quietly.** A checkpoint read that fails and falls back to "no checkpoint"
+restarts the resource at the window start, re-extracting everything the last
+run already loaded — silent duplication on an append-only destination, and
+exactly the degradation the package promises not to do. Leaving rows ``active``
+because the completion write failed is the same class of bug one run later: the
+next run resumes from a finished run's checkpoint.
+
+The checkpoint *write* is the one deliberate exception (see
+:meth:`CheckpointManager.save_checkpoint`) — it only costs re-work on a future
+resume, never changes what this run extracts.
+"""
 
 import logging
 from typing import Any
@@ -22,6 +37,16 @@ _CHECKPOINT_COLUMNS = (
     "updated_at",
 )
 """Checkpoint table columns in DDL order; list_checkpoints keys rows by these."""
+
+
+class CheckpointStateError(RuntimeError):
+    """Setting up, reading, or finalizing checkpoint resume state failed; the run must abort.
+
+    Resume state decides what a resource extracts, so a failure here is a gate,
+    not observability — degrading to "no checkpoint" silently re-extracts from
+    the window start. Subclasses ``RuntimeError``, which this manager has
+    always raised for setup failures, so existing handlers keep working.
+    """
 
 
 def checkpoint_table_ddl(adapter: DestinationAdapter, dataset: str, table: str) -> str:
@@ -139,14 +164,19 @@ class CheckpointManager:
             self._ensure_checkpoint_table(dataset)
         except Exception as e:
             logging.error(f"Failed to create checkpoint table: {e}")
-            raise RuntimeError(f"Failed to initialize checkpoint table: {e}") from e
+            raise CheckpointStateError(f"Failed to initialize checkpoint table: {e}") from e
 
-        # Load latest checkpoint
+        # Load latest checkpoint. Never downgraded to "start fresh": an
+        # unreadable checkpoint and an absent one are not the same fact, and
+        # treating the first as the second re-extracts the whole window.
         try:
             self.last_checkpoint = self._load_latest_checkpoint()
         except Exception as e:
-            logging.warning(f"Failed to load checkpoint, starting fresh: {e}")
-            self.last_checkpoint = None
+            raise CheckpointStateError(
+                f"[{self.resource_name}] failed to read resume state from {self.checkpoint_table}: {e}. "
+                f"Refusing to continue: starting from the window start would silently re-extract "
+                f"everything the previous run already loaded."
+            ) from e
 
         if self.last_checkpoint:
             logging.info(f"[{self.resource_name}] Resuming from checkpoint: {self.last_checkpoint}")
@@ -154,19 +184,29 @@ class CheckpointManager:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Mark completed and cleanup old checkpoints."""
-        if exc_type is None:
-            # Only mark completed and cleanup if we actually created checkpoints
-            if self.page_count > 0:
-                try:
-                    self._mark_completed()
-                except Exception as e:
-                    logging.error(f"Failed to mark checkpoints as completed: {e}")
+        """Mark completed and cleanup old checkpoints.
 
-                try:
-                    self._cleanup_old()
-                except Exception as e:
-                    logging.warning(f"Failed to cleanup old checkpoints: {e}")
+        A failed run leaves its checkpoints ``active`` on purpose — that is what
+        the next run resumes from. A *successful* one must clear them, so the
+        completion write is load-bearing and raises like the read does.
+        """
+        # Only mark completed and cleanup if we actually created checkpoints
+        if exc_type is None and self.page_count > 0:
+            try:
+                self._mark_completed()
+            except Exception as e:
+                raise CheckpointStateError(
+                    f"[{self.resource_name}] failed to mark checkpoints completed in {self.checkpoint_table}: {e}. "
+                    f"They stay 'active', so the next run would resume this finished run's checkpoint instead "
+                    f"of starting from its own bounds."
+                ) from e
+
+            # Retention housekeeping only — deleting already-completed rows
+            # changes no resume decision, so this one stays best-effort.
+            try:
+                self._cleanup_old()
+            except Exception as e:
+                logging.warning(f"Failed to cleanup old checkpoints: {e}")
 
         return False
 
@@ -176,6 +216,14 @@ class CheckpointManager:
 
     def save_checkpoint(self, checkpoint_value: str, page_data: Any) -> None:
         """Save checkpoint to the destination.
+
+        The one write in this module that does not abort the run, and the
+        asymmetry is deliberate: a checkpoint *read* decides what this run
+        extracts, while a checkpoint *write* only decides how much a future
+        resume redoes. A dropped write costs re-extraction from the last
+        checkpoint that did land; failing the run over it would take down a
+        healthy extract whose data path is untouched. It is logged at ERROR,
+        never swallowed quietly.
 
         Args:
             checkpoint_value: String representation of checkpoint (e.g., timestamp, cursor)
@@ -200,8 +248,11 @@ class CheckpointManager:
                     f"value: {checkpoint_value}"
                 )
             except Exception as e:
-                logging.error(f"Failed to save checkpoint: {e}. Continuing without checkpoint.")
-                # Don't raise - checkpoint save failure shouldn't stop pipeline
+                logging.error(
+                    f"[{self.resource_name}] Failed to save checkpoint at page {self.page_count} "
+                    f"(value: {checkpoint_value}): {e}. The run continues — a resume would restart from the "
+                    f"last checkpoint that did land and re-extract everything after it."
+                )
 
     def get_last_checkpoint(self) -> str | None:
         """Get the last saved checkpoint value."""
@@ -216,13 +267,19 @@ class CheckpointManager:
             adapter.execute_sql(client, ddl)
 
     def _load_latest_checkpoint(self) -> str | None:
-        """Load most recent active checkpoint."""
+        """Load the furthest-advanced active checkpoint.
+
+        Ordered by ``page_number``, the run's monotonic key — ``created_at``
+        alone ties whenever two checkpoints land inside one timestamp tick and
+        then resolves arbitrarily, which can resume a run from a checkpoint
+        *behind* the one it reached. ``created_at`` stays as the tiebreaker.
+        """
         adapter, table_ref = self._boundary()
         run_id_condition, run_id_params = self._run_id_condition()
         query = (
             f"SELECT checkpoint_value FROM {table_ref} "
             f"WHERE pipeline_name = ? AND resource_name = ? AND status = 'active' AND {run_id_condition} "
-            "ORDER BY created_at DESC LIMIT 1"
+            "ORDER BY page_number DESC, created_at DESC LIMIT 1"
         )
 
         with open_client(self._pipeline) as client:

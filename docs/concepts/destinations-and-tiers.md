@@ -14,9 +14,9 @@ How `dlt-ops` decides what works against a given destination: any destination dl
 
 ## The two tiers
 
-**`dlt-ops` moves zero rows itself** — dlt owns the data write, and the core run loop (extract, pre-load assertions with `fail`/`warn`, schema contracts, normalize, load) works against **any destination dlt resolves**. That is **core tier**: discovery, `validate`, `run`, scheduling metadata, run-trace persistence, and `clean --local-only` all work there, with no dlt-ops plugin involved.
+**`dlt-ops` ships no connectors and owns no part of the ingest write path** — dlt owns the data write, and the core run loop (extract, pre-load assertions with `fail`/`warn`, schema contracts, normalize, load) works against **any destination dlt resolves**. That is **core tier**: discovery, `validate`, `run`, scheduling metadata, run-trace persistence, and `clean --local-only` all work there, with no dlt-ops plugin involved.
 
-A subset of features has to speak SQL to the destination directly — insert a ledger row, persist a checkpoint mid-run, claim a backfill chunk, diff `information_schema` against your models. SQL needs a dialect, an identifier grammar, a placeholder style, and a live client, and those arrive through a `DestinationAdapter`. A destination with an adapter registered runs at **full tier**, which adds the six adapter-gated features:
+A subset of features has to speak SQL to the destination directly — insert a ledger row, persist a checkpoint mid-run, claim a backfill chunk, diff `information_schema` against your models, insert a quarantined row. Quarantine is the one adapter-routed write that carries **your** data rather than dlt-ops bookkeeping: a row an assertion rejects is removed from the load stream and inserted into `_dlt_rejected` by dlt-ops, not by dlt. SQL needs a dialect, an identifier grammar, a placeholder style, and a live client, and those arrive through a `DestinationAdapter`. A destination with an adapter registered runs at **full tier**, which adds the six adapter-gated features:
 
 - [runs ledger](runs-ledger.md) and `status`
 - [checkpoints](checkpoints.md) (`@with_checkpoints`)
@@ -25,7 +25,7 @@ A subset of features has to speak SQL to the destination directly — insert a l
 - [reconcile](reconciler.md)
 - [assertion](assertions.md) quarantine
 
-That list renders from one constant in the code — every preflight error, run-start warning, and refusal message names the same six features, so the runtime and the docs cannot drift on what full tier means. First-party adapters ship for **DuckDB**, **Postgres**, and **BigQuery**; any other engine reaches full tier the moment someone registers an adapter for it under the `dlt_ops.destination` entry-point group — see [write a destination adapter](../guides/write-a-destination-adapter.md). The [destinations reference](../reference/destinations.md) has the full feature × tier matrix and per-destination notes.
+That list renders from one constant in the code — every preflight error, run-start warning, and refusal message names the same six features, so the runtime and the docs cannot drift on what full tier means. First-party adapters ship for **DuckDB**, **Postgres**, and **BigQuery**; any other engine reaches full tier once an adapter is registered for it, either by [writing one](../guides/write-a-destination-adapter.md) and shipping it under the `dlt_ops.destination` entry-point group, or by opting into a capability-derived adapter at runtime. The [destinations reference](../reference/destinations.md) has the full feature × tier matrix, the per-destination notes, and what a derived adapter does and does not promise.
 
 Every `run` prints the resolved tier in its configuration block before anything executes. The scaffolded demo project (`dlt-ops init demo --example`) points at DuckDB:
 
@@ -97,7 +97,7 @@ A registered adapter that fails to load, or is missing part of the `DestinationA
 
 **Core tier splits along the same asymmetry as the rest of the [failure-semantics contract](failure-semantics.md): observability goes quiet, gates refuse.**
 
-**Observability goes quiet.** The runs ledger has nowhere to live on a core-tier destination, so both ledger writes skip with one INFO line each (shown above) — not an error, because nothing is broken. `status` reports the source as `ledger unsupported`, a state kept distinct from an outage. The `destination_capability` rule reports core mode as a `validate` warning: a plain `validate` still passes, `validate --strict` fails on it —
+**Observability goes quiet.** The runs ledger has nowhere to live on a core-tier destination, so both ledger writes skip with one INFO line each (shown above) — not an error, because nothing is broken. `status` reports the source as `ledger unsupported`, a state kept distinct from an outage. The `destination_capability` rule reports core mode as a `validate` warning, and `--strict` is what surfaces it: a plain `validate` filters warnings out before printing, so it reports `✓ All sources validated successfully` and exits 0. Add `--strict` to see the notice and to fail on it —
 
 ```text
 ⚠ 1 warning(s):
@@ -134,10 +134,28 @@ postgres   SELECT checkpoint_value FROM "demo_data"."_dlt_custom_checkpoints" WH
 Quoting, placeholder style, even ordering semantics (`NULLS LAST`) differ — none of it appears in caller code. Three details make the boundary hold:
 
 - **Parameters bind at the AST level.** Placeholders are swapped as sqlglot AST nodes, never by string interpolation, so values cannot enter the SQL text and a quoting bug cannot reintroduce injection. The one exception is typed, not textual: BigQuery's DB-API cannot bind a `None`, so its adapter inlines `NULL` — as an AST node, still never interpolated text.
-- **Fragments cover what transpile cannot.** sqlglot transpiles syntax, not every function idiom; interval arithmetic is the classic casualty. Each adapter therefore owns tiny canonical-dialect fragments (`timestamp_now_sql`, `timestamp_sub_days_sql(days)`) it guarantees survive its own transpile step, snapshot-locked in tests.
+- **Fragments cover what transpile cannot.** sqlglot transpiles syntax, not every function idiom; interval arithmetic is the classic casualty. The shared base therefore writes those idioms as canonical-dialect fragments (`timestamp_now_sql`, `timestamp_sub_days_sql(days)`) rather than assuming they are portable, and every adapter's rendering of them is snapshot-locked in tests. Both are shared defaults, not per-adapter declarations — sqlglot's writers already carry each dialect's spelling of `CURRENT_TIMESTAMP`, so an adapter overrides a fragment only where its destination needs a spelling transpilation does not produce.
 - **System-table DDL stays lowest-common-denominator.** The ledger, checkpoint, and backfill tables carry no `PARTITION BY` / `CLUSTER BY` — those clauses do not transpile, and the tables are small by design. Per-destination optimizations stay in per-destination helpers, opted into by the users who want them, never in shared DDL.
 
-The `DestinationAdapter` Protocol (in `dlt_ops.destinations.protocol`) is the whole contract: the name/dialect, capability flags (`supports_if_exists`, `supports_create_schema_if_not_exists`, ...), identifier rendering with grammar validation, the two execute calls, and `fetch_columns` for the reconciler. Implementing it — the [adapter guide](../guides/write-a-destination-adapter.md) walks through a full one — is what "full tier" physically means.
+The `DestinationAdapter` Protocol (in `dlt_ops.destinations.protocol`) is the whole contract: `name`, capability flags (`supports_if_exists`, `supports_create_schema_if_not_exists`, ...), identifier rendering with grammar validation, the two execute calls, and `fetch_columns` for the reconciler. `name` is the registry key — the destination's dlt engine name — and nothing more: which dialect an adapter transpiles into is the adapter's own business and stays out of the port, because engines can share a dialect (both T-SQL engines), object stores borrow one, and an engine name is not always a dialect any transpiler knows. The shared base the first-party adapters build on therefore carries `dialect` as its own attribute, separate from `name`. Implementing the Protocol — the [adapter guide](../guides/write-a-destination-adapter.md) walks through a full one — is what "full tier" physically means.
+
+## Capabilities come from dlt
+
+**dlt already publishes, per destination, most of what an adapter would otherwise hand-write, so the shared adapter base reads dlt's own `DestinationCapabilitiesContext` instead of asking each adapter to restate it.** Three facts are derived that way:
+
+| Derived fact | Read from | What it decides |
+|---|---|---|
+| `dialect` | `sqlglot_dialect` | The sqlglot dialect canonical SQL is transpiled into |
+| `placeholder_style` | asking sqlglot's writer for that dialect to render one | The positional placeholder token the adapter emits |
+| `supports_if_exists` | `supports_create_table_if_not_exists` | Whether `IF (NOT) EXISTS` is valid table DDL, or `drop_table_if_exists` must probe first |
+
+An adapter declares one of those attributes only to **override** the derived answer, which it must where the fact belongs to the *driver* rather than the dialect — dlt publishes nothing about driver behaviour. BigQuery is the first-party case: GoogleSQL writes `?`, but dlt's BigQuery `sql_client` feeds positional args to a pyformat DB-API, so its adapter declares `placeholder_style = "%s"`. DuckDB and Postgres declare nothing but their name; for Postgres the driver's paramstyle and the dialect's convention happen to agree on `%s`.
+
+Reading capabilities is cheap and safe to do while an adapter is constructed: `Destination.capabilities()` synthesizes mock credentials rather than resolving real ones, and resolving a factory imports neither the warehouse client library nor its auth stack — so adapter loading stays credential- and SDK-free. One flag is deliberately **not** derived: `supports_create_schema_if_not_exists` is a deployment fact — placement, access control, who owns the namespace — that no capability describes, so each adapter states it.
+
+Derivation never invents a dialect. A destination dlt cannot resolve, or one that publishes no `sqlglot_dialect`, yields nothing to derive from, and the adapter falls back to its own `name` as the transpile target — correct for a third-party adapter whose engine name *is* its dialect, and honest for everyone else, because a dialect name sqlglot does not know fails loudly instead of silently transpiling into the wrong SQL.
+
+Because the derivation is complete enough to build a whole adapter from, a destination with no hand-written adapter can be taken to full tier at runtime with `register_derived_adapter("<engine>")` — deliberately opt-in, and qualified: see [reaching full tier](../reference/destinations.md#reaching-full-tier) for what derivation does and does not prove.
 
 ## Where next
 
