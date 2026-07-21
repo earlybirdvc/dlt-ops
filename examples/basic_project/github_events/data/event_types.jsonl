@@ -1,0 +1,4 @@
+{"name": "push", "description": "Commits pushed to a branch"}
+{"name": "fork", "description": "Repository forked"}
+{"name": "issue", "description": "Issue opened, closed, or edited"}
+{"name": "release", "description": null}

@@ -1,0 +1,170 @@
+# Docs site — Material for MkDocs. Build: uv run --group docs mkdocs build --strict
+site_name: dlt-ops
+site_description: A ready-made structure, toolchain, and set of guides for running many dlt sources in production — an enforced layout, discovery, validation, scheduling metadata, checkpoints, backfill, run ledger, drift detection, and pre-load assertions.
+site_url: https://earlybirdvc.github.io/dlt-ops/
+repo_url: https://github.com/earlybirdvc/dlt-ops
+repo_name: earlybirdvc/dlt-ops
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  logo: assets/logo-white.svg
+  favicon: assets/favicon.svg
+  palette:
+    # Ledger green (values in stylesheets/extra.css); custom = Material's hook for non-named colors.
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
+    - navigation.instant
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.action.edit
+    - content.tabs.link
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            show_source: false
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            members_order: source
+            separate_signature: true
+            show_signature_annotations: true
+  - llmstxt:
+      markdown_description: A ready-made structure, toolchain, and set of guides for running many dlt sources in production — an enforced layout, discovery, validation, scheduling metadata, checkpoints, backfill, runs ledger, schema-drift reconciliation, and pre-load assertions.
+      full_output: llms-full.txt
+      sections:
+        Getting started:
+          - index.md
+          - getting-started/*.md
+        Concepts:
+          - concepts/*.md
+        Guides:
+          - guides/*.md
+        Configuration:
+          - configuration/*.md
+        Reference:
+          - reference/*.md
+        Development:
+          - development/*.md
+  # Off by default: card rendering needs system cairo. CI opts in via SOCIAL_CARDS.
+  - social:
+      enabled: !ENV [SOCIAL_CARDS, false]
+      cards_layout_options:
+        background_color: "#047857"
+        color: "#ffffff"
+        font_family: IBM Plex Sans
+        # Square-padded variant: the layout cover-crops non-square logos.
+        logo: docs/assets/logo-card.svg
+
+extra_css:
+  - stylesheets/extra.css
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - footnotes
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.snippets:
+      base_path: [".", "docs"]
+      check_paths: true
+  - mkdocs-click
+
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+    absolute_links: warn
+  links:
+    not_found: warn
+    anchors: warn
+    unrecognized_links: warn
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - getting-started/installation.md
+      - getting-started/quickstart.md
+      - getting-started/ingest-your-data.md
+      - getting-started/project-layout.md
+  - Concepts:
+      - concepts/discovery.md
+      - concepts/validation.md
+      - concepts/failure-semantics.md
+      - concepts/destinations-and-tiers.md
+      - concepts/runs-ledger.md
+      - concepts/checkpoints.md
+      - concepts/assertions.md
+      - concepts/reconciler.md
+      - concepts/backfill.md
+      - concepts/scheduling-and-orchestration.md
+      - concepts/plugins.md
+  - Guides:
+      - guides/add-a-source.md
+      - guides/build-sources-with-ai.md
+      - guides/adopt-existing-project.md
+      - guides/assertions.md
+      - guides/checkpoint-resume.md
+      - guides/backfill.md
+      - guides/cleanup.md
+      - guides/drift-detection.md
+      - guides/deployment.md
+      - guides/production-readiness.md
+      - guides/airflow.md
+      - guides/dagster.md
+      - guides/prefect.md
+      - guides/write-a-destination-adapter.md
+      - guides/write-plugins.md
+  - Configuration:
+      - configuration/index.md
+      - configuration/reference.md
+      - configuration/rules.md
+  - Reference:
+      - reference/cli.md
+      - reference/api.md
+      - reference/destinations.md
+      - reference/compatibility.md
+      - reference/versioning.md
+  - Development:
+      - development/contributing.md
+      - development/testing.md
+      - development/releases.md

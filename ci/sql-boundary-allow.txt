@@ -1,0 +1,5 @@
+# Per-file allowlist for ci/sql_boundary_guard.sh.
+# Format: <repo-relative-path>:<ticket that ports the file onto DestinationAdapter>
+# One entry per file. The guard fails if an allowlisted file has no hits left
+# (stale entry — the porting ticket must also delete the entry here), so this
+# list only shrinks. Empty list == every SQL site goes through the adapter.
