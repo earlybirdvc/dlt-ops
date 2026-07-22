@@ -233,6 +233,34 @@ class TestJsonOutputIsMachineParseable:
         assert covered == set(_iter_json_command_paths(cli))
 
 
+class TestJsonErrorAndEmptyStatesStayParseable:
+    """``--json`` yields a JSON document in every state, not just the happy path.
+
+    The empty project and the unknown/missing-source errors used to print human
+    text — a coloured banner, an "Available sources" list, an interactive prompt
+    — that a consumer piping to a parser cannot read. The document stays JSON;
+    the exit code carries success or failure.
+    """
+
+    def test_list_json_on_empty_project_is_an_empty_array(self, runner, make_project):
+        project = make_project()  # valid project, no source files
+        result = runner.invoke(cli, ["--root", str(project), "pipeline", "list", "--json"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == []
+
+    def test_resources_json_unknown_source_is_json_and_exits_1(self, runner, project):
+        result = runner.invoke(cli, ["--root", str(project), "pipeline", "resources", "-s", "nope", "--json"])
+        assert result.exit_code == 1
+        payload = json.loads(result.output)
+        assert "nope" in payload["error"]
+        assert payload["available_sources"] == ["github_events"]
+
+    def test_resources_json_without_source_is_json_and_exits_1(self, runner, project):
+        result = runner.invoke(cli, ["--root", str(project), "pipeline", "resources", "--json"])
+        assert result.exit_code == 1
+        assert "source" in json.loads(result.output)["error"].lower()
+
+
 class TestRootResolution:
     def test_root_option_works_from_any_cwd(self, runner, make_project, tmp_path, monkeypatch):
         project = make_project()

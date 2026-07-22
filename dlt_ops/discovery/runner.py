@@ -106,6 +106,14 @@ def _env_var_name(config_key: str) -> str:
     return EnvironProvider.get_key_name(key, *sections)
 
 
+# Every env var apply_dlt_overrides may write, in dlt's spelling. run_pipeline
+# snapshots exactly these around a run and restores them afterwards, so a worker
+# override never outlives the run that set it (see the restore in run_pipeline).
+_MANAGED_WORKER_ENV = tuple(
+    _env_var_name(key) for key in ("normalize.workers", "load.workers", "normalize.data_writer.file_max_items")
+)
+
+
 def _set_env_override(config_key: str, value: int | None, label: str, is_local: bool) -> None:
     """Write ``config_key`` to the environment as an explicit override or a local default.
 
@@ -387,6 +395,13 @@ def run_pipeline(
     runs_writer.write_start()
 
     pipeline: dlt.Pipeline | None = None
+    # Worker overrides reach dlt as env vars — its highest-precedence provider —
+    # so they must stay set through normalize()/load() but not one instant past
+    # the run: a second source driven in the same process would inherit them and,
+    # because env outranks .dlt/config.toml, silently run under this source's
+    # worker counts. Snapshot now; the finally restores. The one-shot CLI never
+    # hit this, an embedding loop does.
+    saved_worker_env = {name: os.environ.get(name) for name in _MANAGED_WORKER_ENV}
     try:
         source_instance = source.source_fn()
         if resources:
@@ -487,6 +502,14 @@ def run_pipeline(
             raise abort from exc
         runs_writer.write_end(status=RunStatus.FAILED, error_summary=summarize_error(exc))
         raise
+    finally:
+        # Scope the overrides to this run: whatever each key held before is put
+        # back, including "absent". Runs after this one re-resolve from scratch.
+        for name, prior in saved_worker_env.items():
+            if prior is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = prior
     _log_section("LOAD SUMMARY", load_info)
 
     trace = pipeline.last_trace

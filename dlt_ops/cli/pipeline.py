@@ -58,10 +58,8 @@ def list_sources(ctx: click.Context, filter_schedule: str | None, output_json: b
     project_root = resolve_cli_project_root(ctx)
     sources = discover(project_root) if output_json else _discover_with_progress(project_root, discover)
 
-    if not sources:
-        click.echo(click.style("No sources found", fg="yellow"))
-        return
-
+    # --json first: an empty project is `[]`, not the human "No sources found"
+    # banner that a consumer piping to a parser cannot read.
     if output_json:
         import json
 
@@ -78,6 +76,10 @@ def list_sources(ctx: click.Context, filter_schedule: str | None, output_json: b
             for name, src in sorted(sources.items())
         ]
         click.echo(json.dumps(data, indent=2))
+        return
+
+    if not sources:
+        click.echo(click.style("No sources found", fg="yellow"))
         return
 
     # Filter by schedule if specified
@@ -143,6 +145,21 @@ def resources(ctx: click.Context, source_name: str | None, output_json: bool) ->
     project_root = resolve_cli_project_root(ctx)
     sources = discover(project_root) if output_json else _discover_with_progress(project_root, discover)
 
+    if output_json:
+        import json
+
+        # --json is non-interactive: the source must be named, and every exit is
+        # a JSON document so a consumer never has to parse around a prompt or a
+        # coloured error line. The exit code carries success/failure.
+        if not source_name:
+            click.echo(json.dumps({"error": "--source/-s is required with --json"}))
+            sys.exit(1)
+        if source_name not in sources:
+            click.echo(json.dumps({"error": f"unknown source {source_name!r}", "available_sources": sorted(sources)}))
+            sys.exit(1)
+        click.echo(json.dumps(list(sources[source_name].resources), indent=2))
+        return
+
     # Interactive source selection if not provided
     if not source_name:
         source_names = sorted(sources.keys())
@@ -172,12 +189,6 @@ def resources(ctx: click.Context, source_name: str | None, output_json: bool) ->
         sys.exit(1)
 
     src = sources[source_name]
-
-    if output_json:
-        import json
-
-        click.echo(json.dumps(list(src.resources), indent=2))
-        return
 
     click.echo()
     click.echo(click.style("Source: ", dim=True) + click.style(source_name, bold=True))

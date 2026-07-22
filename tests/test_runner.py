@@ -43,10 +43,12 @@ _WORKER_ENV_VARS = ("NORMALIZE__WORKERS", "LOAD__WORKERS", "NORMALIZE__DATA_WRIT
 
 @pytest.fixture(autouse=True)
 def _isolate_run_env(tmp_path, monkeypatch):
-    """Keep dlt state in tmp_path and restore worker-tuning env vars.
+    """Keep dlt state in tmp_path; belt-and-suspenders on worker-tuning env vars.
 
-    apply_dlt_overrides writes worker env vars; DLT_DATA_DIR/cwd keep pipeline
-    working dirs and DuckDB files out of the real home directory.
+    run_pipeline now restores the worker env vars it sets, so this restore is
+    defense in depth for a test that drives the lower-level override helpers
+    directly. DLT_DATA_DIR/cwd keep pipeline working dirs and DuckDB files out
+    of the real home directory.
     """
     saved = {var: os.environ.get(var) for var in _WORKER_ENV_VARS}
     monkeypatch.setenv("DLT_DATA_DIR", str(tmp_path / "dlt-data"))
@@ -57,6 +59,30 @@ def _isolate_run_env(tmp_path, monkeypatch):
             os.environ.pop(var, None)
         else:
             os.environ[var] = value
+
+
+@pytest.fixture
+def worker_env_probe(monkeypatch):
+    """Snapshot the worker env vars at the instant the run builds its pipeline.
+
+    run_pipeline restores these once the run ends (they must not leak into the
+    next source in the same process), so the values dlt actually resolved
+    against have to be read inside the run window. The data run's pipeline is
+    the one built with ``progress="log"``; the ledger pipeline (built before the
+    overrides apply) and the trace pipeline (built after the restore) share the
+    source's pipeline name but never set that flag, so keying on it reads the
+    env at exactly the data run's construction.
+    """
+    captured: dict[str, str | None] = {}
+    real_pipeline = runner_mod.dlt.pipeline
+
+    def _probe(*args, **kwargs):
+        if kwargs.get("progress") == "log":
+            captured.update({var: os.environ.get(var) for var in _WORKER_ENV_VARS})
+        return real_pipeline(*args, **kwargs)
+
+    monkeypatch.setattr(runner_mod.dlt, "pipeline", _probe)
+    return captured
 
 
 @pytest.fixture
@@ -559,14 +585,17 @@ TUNED_PROJECT_CONFIG = """\
 
 
 class TestLocalWorkerDefaults:
-    def test_duckdb_run_applies_local_defaults_even_with_explicit_dataset(self, make_project):
+    def test_duckdb_run_applies_local_defaults_even_with_explicit_dataset(self, make_project, worker_env_probe):
         """The old `is_local = dataset_name is None` conflation is gone: local
         worker tuning keys off the destination type, not dataset presence."""
         root = make_project(config=PROJECT_CONFIG)
         info = make_source_info("tuning_rows", simple_rows_source)
         run_pipeline(info, project_root=root, dataset_name="explicit_ds")
-        assert os.environ.get("NORMALIZE__WORKERS") == "4"
-        assert os.environ.get("LOAD__WORKERS") == "3"
+        assert worker_env_probe["NORMALIZE__WORKERS"] == "4"
+        assert worker_env_probe["LOAD__WORKERS"] == "3"
+        # Restored once the run ended — nothing lingers for the next source.
+        assert os.environ.get("NORMALIZE__WORKERS") is None
+        assert os.environ.get("LOAD__WORKERS") is None
 
     def test_configured_workers_survive_a_local_run(self, make_project, dlt_run_context):
         """Environment variables outrank every other dlt provider, so the
@@ -584,7 +613,7 @@ class TestLocalWorkerDefaults:
         assert dlt.config.get("normalize.workers", int) == 9
         assert dlt.config.get("load.workers", int) == 7
 
-    def test_local_defaults_apply_when_nothing_is_configured(self, make_project, dlt_run_context):
+    def test_local_defaults_apply_when_nothing_is_configured(self, make_project, dlt_run_context, worker_env_probe):
         """The dev-loop convenience is intact: a project that says nothing about
         workers still gets the local numbers on a DuckDB run."""
         root = make_project(config=PROJECT_CONFIG)
@@ -594,24 +623,30 @@ class TestLocalWorkerDefaults:
         info = make_source_info("tuning_rows", simple_rows_source)
         run_pipeline(info, project_root=root)
 
-        assert dlt.config.get("normalize.workers", int) == 4
-        assert dlt.config.get("load.workers", int) == 3
+        # The local defaults are the env-var provider dlt resolves against during
+        # the run — read them in-window, since the run rolls them back on exit.
+        assert worker_env_probe["NORMALIZE__WORKERS"] == "4"
+        assert worker_env_probe["LOAD__WORKERS"] == "3"
         # No local default is declared for file size — it stays dlt's business.
-        assert os.environ.get("NORMALIZE__DATA_WRITER__FILE_MAX_ITEMS") is None
+        assert worker_env_probe["NORMALIZE__DATA_WRITER__FILE_MAX_ITEMS"] is None
 
-    def test_explicit_flag_outranks_a_configured_value(self, make_project, dlt_run_context):
+    def test_explicit_flag_outranks_a_configured_value(self, make_project, dlt_run_context, worker_env_probe):
         """`-n` is an override, not a default: it wins over config.toml too."""
         root = make_project(config=TUNED_PROJECT_CONFIG)
         dlt_run_context(root)
         info = make_source_info("tuning_rows", simple_rows_source)
         run_pipeline(info, project_root=root, normalize_workers=2, file_max_items=500)
 
-        assert os.environ.get("NORMALIZE__WORKERS") == "2"
-        assert os.environ.get("NORMALIZE__DATA_WRITER__FILE_MAX_ITEMS") == "500"
-        assert dlt.config.get("normalize.workers", int) == 2
+        # The override is live for the run (2 beats the configured 9)...
+        assert worker_env_probe["NORMALIZE__WORKERS"] == "2"
+        assert worker_env_probe["NORMALIZE__DATA_WRITER__FILE_MAX_ITEMS"] == "500"
+        # ...load took no override, so it resolves from config.toml — and because
+        # no env var ever shadowed it, that resolution survives the run.
         assert dlt.config.get("load.workers", int) == 7
 
-    def test_exported_env_var_outranks_the_local_default(self, make_project, dlt_run_context, monkeypatch):
+    def test_exported_env_var_outranks_the_local_default(
+        self, make_project, dlt_run_context, monkeypatch, worker_env_probe
+    ):
         """A value the operator or orchestrator exported is a deliberate choice."""
         root = make_project(config=PROJECT_CONFIG)
         dlt_run_context(root)
@@ -619,8 +654,30 @@ class TestLocalWorkerDefaults:
         info = make_source_info("tuning_rows", simple_rows_source)
         run_pipeline(info, project_root=root)
 
+        # During the run the exported 6 stands and only NORMALIZE takes a default.
+        assert worker_env_probe["LOAD__WORKERS"] == "6"
+        assert worker_env_probe["NORMALIZE__WORKERS"] == "4"
+        # The restore leaves the operator's export untouched and rolls back only
+        # the default the run itself introduced.
         assert os.environ.get("LOAD__WORKERS") == "6"
-        assert os.environ.get("NORMALIZE__WORKERS") == "4"
+        assert os.environ.get("NORMALIZE__WORKERS") is None
+
+    def test_worker_override_does_not_leak_into_the_next_in_process_run(self, make_project, dlt_run_context):
+        """The reason the restore exists: env is dlt's highest-precedence
+        provider, so an override left behind would silently run the next source
+        in the same process under this source's counts — overriding its own
+        .dlt/config.toml. Every managed key is back to absent once the run ends.
+        """
+        root = make_project(config=PROJECT_CONFIG)
+        dlt_run_context(root)
+        info = make_source_info("tuning_rows", simple_rows_source)
+        run_pipeline(info, project_root=root, normalize_workers=8, load_workers=8, file_max_items=999)
+
+        assert os.environ.get("NORMALIZE__WORKERS") is None
+        assert os.environ.get("LOAD__WORKERS") is None
+        assert os.environ.get("NORMALIZE__DATA_WRITER__FILE_MAX_ITEMS") is None
+        # Config resolves cleanly for whatever runs next — no env shadow remains.
+        assert dlt.config.get("normalize.workers", int) is None
 
     def test_local_default_keys_map_to_the_documented_env_vars(self):
         """The defaults are keyed by dlt config key; the env-var spelling comes
