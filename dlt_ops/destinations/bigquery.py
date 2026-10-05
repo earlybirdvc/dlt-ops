@@ -38,7 +38,8 @@ class BigQueryAdapter(SqlAdapterBase):
         # INFORMATION_SCHEMA is scoped per dataset, so the dataset is an
         # identifier in the table ref (validated), not a bindable param.
         return (
-            f"SELECT column_name, data_type FROM {self.render_identifier(dataset)}.INFORMATION_SCHEMA.COLUMNS"
+            "SELECT column_name, data_type, is_partitioning_column"
+            f" FROM {self.render_identifier(dataset)}.INFORMATION_SCHEMA.COLUMNS"
             " WHERE table_name = ? ORDER BY ordinal_position",
             (table,),
         )

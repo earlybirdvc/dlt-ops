@@ -49,7 +49,7 @@ The full member surface — the Tier-2 preflight probes every one of these, attr
 | `table_exists(client, dataset, table) -> bool` | Existence probe. |
 | `drop_table_if_exists(client, dataset, table) -> None` | Idempotent drop. |
 | `ensure_schema(client, dataset) -> None` | Create the schema when supported and needed; callers invoke it unconditionally. |
-| `fetch_columns(client, dataset, table) -> list[ColumnInfo] \| None` | Columns from one `information_schema.columns` SELECT; `None` when the table (or its dataset) is absent — never an empty list. |
+| `fetch_columns(client, dataset, table) -> list[ColumnInfo] \| None` | Columns from one `information_schema.columns` SELECT; `None` when the table (or its dataset) is absent — never an empty list. Optionally set `ColumnInfo.is_partition_column=True` on the column the destination partitions the table on; the reconciler uses it as a table's [time column](../concepts/reconciler.md#time-column-per-table) when the table lacks `load_timestamp_column`. The default `False` is valid: an adapter that does not report partitioning keeps working and gets no partition fallback. |
 
 `ColumnInfo` and the `Cursor` protocol are public imports from `dlt_ops.destinations`. The DuckDB adapter (`dlt_ops/destinations/duckdb.py`) is the smallest real implementation to crib from — note it builds on an internal base class (`_base.py`) that third-party adapters should not import; implement the Protocol directly, as this guide does.
 

@@ -6,9 +6,8 @@ Runs against every discovered source regardless of contract mode:
   resource's live destination schema against its `columns=<PydanticModel>`
   declaration and emits one alert event per drifted RESOURCE.
 - Removal detection (`detect_removal`) runs a windowed non-null-coverage
-  diff against each resource's destination table (on the configured
-  ``load_timestamp_column``), emitting when a known column's coverage
-  collapses.
+  diff against each resource's destination table (on the table's time
+  column), emitting when a known column's coverage collapses.
 
 Each source reconciles against its own destination + dataset resolved from
 the project config chain; all SQL is canonical (DuckDB dialect) and executes

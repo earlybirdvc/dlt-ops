@@ -156,6 +156,10 @@ class SqlAdapterBase:
         ``information_schema`` in which dataset and table are *data*, bound as
         params rather than spliced in as identifiers. Destinations that scope
         the view per dataset override this.
+
+        The SELECT returns ``column_name, data_type`` and may add a third column:
+        the SQL-standard ``YES``/``NO`` flag that marks the partition column.
+        Without it, every column reports ``is_partition_column=False``.
         """
         return (
             "SELECT column_name, data_type FROM information_schema.columns"
@@ -272,4 +276,11 @@ class SqlAdapterBase:
         rows = cursor.fetchall()
         if not rows:
             return None
-        return [ColumnInfo(name=str(row[0]), data_type=str(row[1])) for row in rows]
+        return [
+            ColumnInfo(
+                name=str(row[0]),
+                data_type=str(row[1]),
+                is_partition_column=len(row) > 2 and str(row[2]).upper() == "YES",
+            )
+            for row in rows
+        ]

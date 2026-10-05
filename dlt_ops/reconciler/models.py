@@ -50,8 +50,8 @@ class DriftFinding:
     column, positionally aligned to ``columns``.
 
     ``reproduce_sql`` is a copy-pasteable canonical-dialect SELECT computed at
-    detection time (where the resolved dataset and load-timestamp column are
-    known) so alert sinks stay pure serializers with no SQL knowledge.
+    detection time (where the resolved dataset and the table's time column
+    are known) so alert sinks stay pure serializers with no SQL knowledge.
     """
 
     kind: DriftKind

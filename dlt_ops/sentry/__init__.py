@@ -239,16 +239,19 @@ class SentryAlertSink:
 
         ``level="error"`` (capture_exception's default) because a reconciler
         failure means drift is no longer being observed on that resource —
-        an infra problem, not a data problem. Inert when the DSN is unset.
+        an infra problem, not a data problem. Inert when the DSN is unset: the
+        error is then logged as one WARNING with the exception text and no
+        traceback, so a host's logging integration does not report it as a
+        second, differently grouped event.
         """
         client = self._get_client()
         if client is None:
-            logger.exception(
-                "reconciler error (Sentry sink inert): source=%s resource=%s context=%s",
+            logger.warning(
+                "reconciler error (Sentry sink inert): source=%s resource=%s context=%s: %s",
                 source_name,
                 resource_name,
                 context,
-                exc_info=exc,
+                exc,
             )
             return
 

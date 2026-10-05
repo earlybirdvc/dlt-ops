@@ -182,7 +182,7 @@ EXPECTED_COLUMNS_SQL = {
         "WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position"
     ),
     "bigquery": (
-        "SELECT column_name, data_type FROM `ds`.INFORMATION_SCHEMA.COLUMNS "
+        "SELECT column_name, data_type, is_partitioning_column FROM `ds`.INFORMATION_SCHEMA.COLUMNS "
         "WHERE table_name = %s ORDER BY ordinal_position NULLS LAST"
     ),
 }
@@ -867,6 +867,7 @@ class TestDuckDBLive:
         ]
         assert columns[0] == ColumnInfo(name="pipeline_name", data_type="VARCHAR")
         assert ColumnInfo(name="page_number", data_type="BIGINT") in columns
+        assert not any(column.is_partition_column for column in columns)
 
     def test_fetch_columns_absent_returns_none(self, duckdb_adapter, duckdb_client):
         assert duckdb_adapter.fetch_columns(duckdb_client, DATASET, "no_such_table") is None
