@@ -1,13 +1,7 @@
 """Live destination tables shared by both detectors: one schema fetch, one time-column rule.
 
-Both detectors read each resource's live columns before they query the table.
-A resource's table name is the resource name normalized with the source's
-naming convention, and its dataset is the configured dataset normalized with
-the same convention. Every query and ``reproduce_sql`` uses both names.
-A resource whose table is absent is skipped, so a declared resource that never
-landed produces no query and no error. Each present table gets its own time
-column, which drives removal's coverage windows, additive sampling, and the
-``reproduce_sql`` on every finding.
+Both detectors look up each resource's table here before they query it, so
+they share one schema fetch, one physical-name rule, and one time-column rule.
 """
 
 from __future__ import annotations

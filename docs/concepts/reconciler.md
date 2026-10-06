@@ -125,7 +125,7 @@ Source: demo_events (removal)  |  Findings: 0  |  Duration: 0.26s
 
 Removal detection skips a table with no time column: it logs one INFO line naming the table, runs no query, and reports no error. Additive detection uses the same time column to window and order its sample query, and every `reproduce` SELECT filters on it. A table without one gets an unordered `LIMIT 5` for both.
 
-The windowed queries compare the time column with a timestamp. If the fallback partition column is a DATE or integer column, or it is the `_PARTITIONDATE` pseudo column of a table partitioned by ingestion time, the removal coverage query fails. That failure is reported for that table only, through the sink's error path, and the sweep continues. For additive detection, the same mismatch only fails the sample query, so the finding is still reported, without samples.
+The windowed queries compare the time column with a timestamp parameter, so the destination must support that comparison for the column it reports as the partition column. An unsupported comparison is reported for that table only, through the sink's error path, and the sweep continues: removal yields no coverage for the table, while additive still reports its finding, without samples.
 
 ## Findings and alert-sink routing
 

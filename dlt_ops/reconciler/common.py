@@ -118,13 +118,11 @@ def destination_column_names(
 ) -> set[str]:
     """Return the destination-side name of each model field.
 
-    One name per field (``destination_field_names`` — the alias if set, else
-    the attribute name, which is dlt's rule for naming a field's column), run
-    through the same normalizer dlt uses on the write. A Pydantic attribute
-    `startTime` becomes `start_time`; a `Field(alias="FROM")` field becomes
-    `from`, and its attribute name is not used. Callers (the additive and
-    removal detectors) diff against and query live destination columns, so a
-    name dlt never writes would read as drift or fail the query.
+    Every name from ``destination_field_names`` runs through the same
+    normalizer dlt uses on the write, so a Pydantic attribute `startTime`
+    becomes `start_time`. Callers (the additive and removal detectors) diff
+    against and query live destination columns, so a name dlt never writes
+    would read as drift or fail the query.
 
     ``naming`` is injected by the caller from ``resolve_source_naming(source)``
     so every source uses its own dlt Schema's convention, not a hardcoded one.

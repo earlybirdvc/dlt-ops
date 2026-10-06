@@ -241,8 +241,8 @@ class SentryAlertSink:
         failure means drift is no longer being observed on that resource —
         an infra problem, not a data problem. Inert when the DSN is unset: the
         error is then logged as one WARNING with the exception text and no
-        traceback, so a host's logging integration does not report it as a
-        second, differently grouped event.
+        traceback. A host integration configured to capture warnings may still
+        report that record.
         """
         client = self._get_client()
         if client is None:

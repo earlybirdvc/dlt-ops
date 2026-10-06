@@ -22,11 +22,9 @@ when ``load_timestamp_column`` is unset, detection is skipped and the result
 carries a warning (``ReconcileResult.warnings``) so ``validate``/CLI flows
 can surface the degradation.
 
-**Time column per table.** The live columns are read first; a resource whose
-table is absent is skipped. A table's time column is the configured
-``load_timestamp_column`` (normalized with the source's naming convention)
-when the table has it, else the column the destination reports as the
-partition column. A table with neither is skipped with an INFO log.
+**Time column per table.** Each table is windowed on its own time column,
+resolved by ``_live_tables.resolve_time_column``. A resource whose table is
+absent is skipped, and so is a table with no time column, with an INFO log.
 
 Batching: per resource, one query computes recent+baseline coverage for
 every column in one shot — ``1`` query per resource instead of ``N_cols``.

@@ -25,8 +25,8 @@ def build_coverage_query(
     window flags (bounds parameter-bound, so the SQL text is value-free);
     the outer SELECT computes NULL-safe coverage ratios per column in
     transpilable form (``CAST(SUM(CASE ...) AS DOUBLE) / NULLIF(SUM(...), 0)``
-    — a zero-row window divides by NULL and yields NULL, matching the
-    "can't distinguish idle from dropped" contract in ``removal._is_removal``).
+    — a zero-row window divides by NULL and yields NULL, which the caller
+    reads as unknown coverage rather than as zero).
 
     The inner ``WHERE <time_column> >= ?`` (baseline start) is a hard lower
     bound on the table's time column. When the destination partitions the
