@@ -71,7 +71,7 @@ from dlt_ops.reconciler.models import DriftFinding, DriftKind, ReconcileResult
 if TYPE_CHECKING:
     from typing import Any
 
-    from dlt_ops.destinations import ColumnInfo
+    from dlt_ops.reconciler._live_tables import LiveTable
     from dlt_ops.reconciler.protocols import AlertSink, QueryRunner, SchemaFetcher
 
 
@@ -94,10 +94,9 @@ LOAD_TIMESTAMP_UNSET_WARNING = (
 def _detect_removal_for_resource(
     source: SourceInfo,
     resource_name: str,
-    live_columns: "tuple[ColumnInfo, ...]",
+    live_table: "LiveTable",
     *,
     runner: "QueryRunner",
-    dataset: str,
     load_timestamp_column: str,
     baseline_threshold: float,
     recent_threshold: float,
@@ -112,16 +111,16 @@ def _detect_removal_for_resource(
     resource's model-column set is normalized with the same convention dlt
     actually uses on the write path. ``load_timestamp_column`` is the
     configured name; the table's own time column is resolved from it and
-    ``live_columns``.
+    ``live_table``'s columns.
     """
     model = resource_pydantic_model(source, resource_name)
     if model is None:
         logger.debug("resource %s.%s has no Pydantic columns= — skipping removal detection", source.name, resource_name)
         return None
 
-    time_column = resolve_time_column(live_columns, load_timestamp_column, naming)
+    time_column = resolve_time_column(live_table.columns, load_timestamp_column, naming)
     if time_column is None:
-        logger.info("table %s.%s has no time column — skipping removal detection", dataset, resource_name)
+        logger.info("table %s.%s has no time column — skipping removal detection", live_table.dataset, live_table.name)
         return None
 
     # Destination-side (post-dlt-normalize) so the coverage projection targets
@@ -134,8 +133,8 @@ def _detect_removal_for_resource(
 
     now = datetime.now(tz=UTC)
     sql, params = build_coverage_query(
-        dataset,
-        resource_name,
+        live_table.dataset,
+        live_table.name,
         known_columns,
         time_column=time_column,
         recent_start=now - timedelta(hours=recent_window_hours),
@@ -178,8 +177,8 @@ def _detect_removal_for_resource(
         sample_values={col: [] for col in drifted_tuple},
         first_seen_at=first_seen_at,
         reproduce_sql=build_reproduce_sql(
-            dataset,
-            resource_name,
+            live_table.dataset,
+            live_table.name,
             drifted_tuple,
             first_seen_at=first_seen_at,
             time_column=time_column,
@@ -226,24 +225,23 @@ def _detect_removal_drift(
     through the sink's error path but don't stop the sweep; a schema-fetch
     failure is reported once and propagates to the caller as ``result.error``.
     """
-    live_tables = fetch_live_tables(source, fetcher=fetcher, dataset=dataset, sink=sink)
     # Resolve the source's own NamingConvention once so every resource shares
-    # a single lookup and every SQL projection targets the exact column names
-    # dlt actually wrote — not a hardcoded default.
+    # a single lookup and every SQL reference targets the exact table and
+    # column names dlt actually wrote — not a hardcoded default.
     naming = resolve_source_naming(source)
+    live_tables = fetch_live_tables(source, fetcher=fetcher, dataset=dataset, naming=naming, sink=sink)
     findings: list[DriftFinding] = []
     for resource_name in source.resources:
-        columns = live_tables.get(resource_name)
-        if columns is None:
+        live_table = live_tables.get(resource_name)
+        if live_table is None:
             continue
 
         try:
             finding = _detect_removal_for_resource(
                 source,
                 resource_name,
-                columns,
+                live_table,
                 runner=runner,
-                dataset=dataset,
                 load_timestamp_column=load_timestamp_column,
                 baseline_threshold=baseline_threshold,
                 recent_threshold=recent_threshold,

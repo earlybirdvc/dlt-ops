@@ -57,26 +57,28 @@ def _coverage_queries(runner: FakeQueryRunner) -> list[str]:
     return [sql for sql, _params in runner.queries if "AS recent_" in sql]
 
 
-def _detect_removal(source: Any, *, fetcher: Any, runner: Any, sink: Any = None, project_config: Any = None):
+def _detect_removal(
+    source: Any, *, fetcher: Any, runner: Any, sink: Any = None, project_config: Any = None, dataset: str = "raw"
+):
     return removal_mod.detect_removal(
         source.name,
         dry_run=sink is None,
         runner=runner,
         fetcher=fetcher,
-        dataset="raw",
+        dataset=dataset,
         sources={source.name: source},
         project_config=project_config if project_config is not None else _project_config(),
         sink=sink,
     )
 
 
-def _reconcile_additive(source: Any, *, fetcher: Any, runner: Any, project_config: Any = None):
+def _reconcile_additive(source: Any, *, fetcher: Any, runner: Any, project_config: Any = None, dataset: str = "raw"):
     return additive_mod.reconcile_source(
         source.name,
         dry_run=True,
         fetcher=fetcher,
         runner=runner,
-        dataset="raw",
+        dataset=dataset,
         sources={source.name: source},
         project_config=project_config if project_config is not None else _project_config(),
     )
@@ -102,6 +104,13 @@ class TestResolveTimeColumn:
 
     def test_configured_name_is_normalized_before_the_lookup(self, resolve_time_column):
         assert resolve_time_column(_event_columns("loaded_at"), "loadedAt", self.NAMING) == "loaded_at"
+
+    def test_configured_path_separator_is_kept(self, resolve_time_column):
+        assert resolve_time_column(_event_columns("loaded__at"), "loaded__at", self.NAMING) == "loaded__at"
+
+    def test_configured_path_separator_is_kept_without_a_partition_column(self, resolve_time_column):
+        columns = _event_columns("loaded__at", partitioned=False)
+        assert resolve_time_column(columns, "loaded__at", self.NAMING) == "loaded__at"
 
     def test_partition_column_when_configured_column_is_absent(self, resolve_time_column):
         assert resolve_time_column(_event_columns(), "loaded_at", self.NAMING) == "event_ts"
@@ -178,6 +187,22 @@ class TestRemovalLiveTables:
         [sql] = _coverage_queries(runner)
         assert 'WHERE "loaded_at" >= ?' in sql
         assert '"loadedAt"' not in sql
+
+    def test_configured_path_separator_is_kept_in_the_sql(self):
+        """dlt keeps the `__` separator in a column name, so `loaded__at` lands as `loaded__at`."""
+        source = _make_source(resources={"order_items": OrderItemModel})
+        fetcher = FakeSchemaFetcher({"order_items": ORDER_ITEM_LIVE[:-1] + _cols("loaded__at")})
+        runner = FakeQueryRunner(default_coverage=(0.0, 0.9))
+
+        result = _detect_removal(
+            source, fetcher=fetcher, runner=runner, project_config=_project_config(load_timestamp_column="loaded__at")
+        )
+
+        assert result.error is None
+        [sql] = _coverage_queries(runner)
+        assert 'WHERE "loaded__at" >= ?' in sql
+        [finding] = result.findings
+        assert '"loaded__at" >= TIMESTAMP' in finding.reproduce_sql
 
     def test_no_time_column_skips_the_table_with_one_info_log(self, caplog):
         source = _make_source(resources={"events": EventModel})

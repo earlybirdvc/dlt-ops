@@ -10,9 +10,9 @@ Two views of a model's field names:
   single stable key to include). Pydantic v2 models with
   `populate_by_name=True` accept both the attribute name and the alias on
   input, so both are known.
-- `destination_field_names` — the one column name dlt writes per field,
-  before destination-side normalization. The reconciler diffs and queries
-  live destination columns, so it uses this view.
+- `destination_field_names` — the name the reconciler uses for each field:
+  the alias if set, else the attribute name (dlt's rule for naming a field's
+  column), before destination-side normalization.
 """
 
 from collections.abc import Callable
@@ -38,9 +38,10 @@ def extract_model_column_names(model: type[pydantic.BaseModel]) -> set[str]:
 
 
 def destination_field_names(model: type[pydantic.BaseModel]) -> set[str]:
-    """Return the column name dlt writes for each model field: the alias if set, else the attribute name.
+    """Return each model field's column name: the alias if set, else the attribute name.
 
-    This is the rule dlt's ``pydantic_to_table_schema_columns`` applies.
+    This is the rule dlt's ``pydantic_to_table_schema_columns`` applies to name
+    a field's column.
     ``validation_alias`` and ``serialization_alias`` change parsing and
     dumping, not the schema column, so they are not names here.
     """

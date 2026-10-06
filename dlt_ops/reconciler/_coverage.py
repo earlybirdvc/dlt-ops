@@ -29,9 +29,10 @@ def build_coverage_query(
     "can't distinguish idle from dropped" contract in ``removal._is_removal``).
 
     The inner ``WHERE <time_column> >= ?`` (baseline start) is a hard lower
-    bound on the table's time column so time-partitioned destinations prune to
-    the trailing baseline window — every reconcile pass then reads at most
-    ``baseline_window_days``' worth of partitions per resource.
+    bound on the table's time column. When the destination partitions the
+    table on that column, it prunes to the trailing baseline window, so a
+    pass reads at most ``baseline_window_days``' worth of partitions per
+    resource.
 
     Result columns come in pairs, positionally: ``(recent, baseline)`` per
     input column, in input order.

@@ -63,7 +63,7 @@ from dlt_ops.reconciler.models import DriftFinding, DriftKind, ReconcileResult
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from dlt_ops.destinations import ColumnInfo
+    from dlt_ops.reconciler._live_tables import LiveTable
     from dlt_ops.reconciler.protocols import AlertSink, QueryRunner, SchemaFetcher
 
 
@@ -90,7 +90,7 @@ def is_dlt_system_column(name: str) -> bool:
 def _fetch_sample_values(
     runner: "QueryRunner",
     dataset: str,
-    resource_name: str,
+    table: str,
     columns: tuple[str, ...],
     *,
     time_column: str | None,
@@ -113,7 +113,7 @@ def _fetch_sample_values(
         return {}
 
     projection = ", ".join(canonical_ident(col) for col in columns)
-    table_ref = canonical_table_ref(dataset, resource_name)
+    table_ref = canonical_table_ref(dataset, table)
     if time_column:
         ts = canonical_ident(time_column)
         sql = f"SELECT {projection} FROM {table_ref} WHERE {ts} >= ? ORDER BY {ts} DESC LIMIT {_SAMPLE_LIMIT}"
@@ -125,7 +125,7 @@ def _fetch_sample_values(
     try:
         rows = runner.query(sql, params)
     except Exception:
-        logger.warning("sample-values query failed for %s.%s — continuing without samples", dataset, resource_name)
+        logger.warning("sample-values query failed for %s.%s — continuing without samples", dataset, table)
         return {}
 
     samples: dict[str, list[Any]] = {col: [] for col in columns}
@@ -147,10 +147,9 @@ def _fetch_sample_values(
 def _detect_resource_drift(
     source: SourceInfo,
     resource_name: str,
-    live_columns: "tuple[ColumnInfo, ...]",
+    live_table: "LiveTable",
     *,
     runner: "QueryRunner",
-    dataset: str,
     ignored_columns: frozenset[str],
     naming: "Any",
     load_timestamp_column: str | None,
@@ -167,7 +166,7 @@ def _detect_resource_drift(
     resource's model-column set is normalized with the same convention dlt
     actually uses on the write path. ``load_timestamp_column`` is the
     configured name; the table's own time column is resolved from it and
-    ``live_columns``.
+    ``live_table``'s columns.
     """
     model = resource_pydantic_model(source, resource_name)
     if model is None:
@@ -176,8 +175,8 @@ def _detect_resource_drift(
         )
         return None
 
-    live_names = {col.name for col in live_columns}
-    live_types = {col.name: col.data_type for col in live_columns}
+    live_names = {col.name for col in live_table.columns}
+    live_types = {col.name: col.data_type for col in live_table.columns}
     # Both sides must speak destination-side (post-dlt-normalize) names.
     # `destination_column_names` runs the model's attribute names + aliases
     # through the same NamingConvention dlt uses on the write — otherwise a
@@ -200,8 +199,8 @@ def _detect_resource_drift(
 
     drifted = tuple(sorted(drift))
     inferred_types = tuple(live_types.get(col, "") for col in drifted)
-    time_column = resolve_time_column(live_columns, load_timestamp_column, naming)
-    samples = _fetch_sample_values(runner, dataset, resource_name, drifted, time_column=time_column)
+    time_column = resolve_time_column(live_table.columns, load_timestamp_column, naming)
+    samples = _fetch_sample_values(runner, live_table.dataset, live_table.name, drifted, time_column=time_column)
     first_seen_at = datetime.now(tz=UTC)
 
     return DriftFinding(
@@ -214,8 +213,8 @@ def _detect_resource_drift(
         sample_values=samples,
         first_seen_at=first_seen_at,
         reproduce_sql=build_reproduce_sql(
-            dataset,
-            resource_name,
+            live_table.dataset,
+            live_table.name,
             drifted,
             first_seen_at=first_seen_at,
             time_column=time_column,
@@ -239,27 +238,25 @@ def _detect_source_drift(
     reported once and propagates to the caller so the public
     ``reconcile_source`` wrapper surfaces it via ``result.error``.
     """
-    live_tables = fetch_live_tables(source, fetcher=fetcher, dataset=dataset, sink=sink)
-
     # Resolve the source's own NamingConvention once (source_fn()-backed) so
-    # every resource in the loop normalizes model names with the exact
-    # convention dlt uses on the write path — not a hardcoded default.
+    # every resource in the loop normalizes table and model names with the
+    # exact convention dlt uses on the write path — not a hardcoded default.
     naming = resolve_source_naming(source)
+    live_tables = fetch_live_tables(source, fetcher=fetcher, dataset=dataset, naming=naming, sink=sink)
     ignored_columns = ignored_columns_for(source, naming, project_config)
     load_timestamp_column = configured_load_timestamp_column(project_config)
     findings: list[DriftFinding] = []
     for resource_name in source.resources:
-        columns = live_tables.get(resource_name)
-        if columns is None:
+        live_table = live_tables.get(resource_name)
+        if live_table is None:
             continue
 
         try:
             finding = _detect_resource_drift(
                 source,
                 resource_name,
-                columns,
+                live_table,
                 runner=runner,
-                dataset=dataset,
                 ignored_columns=ignored_columns,
                 naming=naming,
                 load_timestamp_column=load_timestamp_column,

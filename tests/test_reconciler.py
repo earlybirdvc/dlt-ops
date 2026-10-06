@@ -455,15 +455,21 @@ class TestAdditiveDetection:
             def normalize_identifier(self, name: str) -> str:
                 return name.upper()
 
+            normalize_path = normalize_identifier
+
+            normalize_tables_path = normalize_identifier
+            normalize_table_identifier = normalize_identifier
+
         source = _make_source(resources={"order_items": OrderItemModel}, naming=UppercaseNaming())
         fetcher = FakeSchemaFetcher(
             {
-                "order_items": _cols(
+                "ORDER_ITEMS": _cols(
                     "API_ID", "ORDER_ID", "NAME", "DISCOUNT_CODE", ("LOADED_AT", "TIMESTAMP"), "REGION_ID"
                 )
             }
         )
         result = self._reconcile(source, fetcher, FakeQueryRunner())
+        assert result.error is None
         assert result.findings == ()
 
     def test_uppercased_alias_matches_lowercased_column(self):
@@ -599,7 +605,7 @@ class TestAdditiveDetection:
 
         original = additive_mod._detect_resource_drift
 
-        def flaky(src, res, cols, *, runner, dataset, ignored_columns, naming, load_timestamp_column):
+        def flaky(src, res, cols, *, runner, ignored_columns, naming, load_timestamp_column):
             if res == "bad_res":
                 raise RuntimeError("simulated per-resource failure")
             return original(
@@ -607,7 +613,6 @@ class TestAdditiveDetection:
                 res,
                 cols,
                 runner=runner,
-                dataset=dataset,
                 ignored_columns=ignored_columns,
                 naming=naming,
                 load_timestamp_column=load_timestamp_column,
@@ -792,9 +797,14 @@ class TestRemovalDetection:
             def normalize_identifier(self, name: str) -> str:
                 return name.upper()
 
+            normalize_path = normalize_identifier
+
+            normalize_tables_path = normalize_identifier
+            normalize_table_identifier = normalize_identifier
+
         source = _make_source(resources={"order_items": OrderItemModel}, naming=UppercaseNaming())
         runner = FakeQueryRunner()
-        fetcher = FakeSchemaFetcher({"order_items": _cols("API_ID", "ORDER_ID", ("LOADED_AT", "TIMESTAMP"))})
+        fetcher = FakeSchemaFetcher({"ORDER_ITEMS": _cols("API_ID", "ORDER_ID", ("LOADED_AT", "TIMESTAMP"))})
 
         result = self._detect(source, runner, fetcher=fetcher)
 

@@ -58,13 +58,19 @@ logger = logging.getLogger(__name__)
 class _Normalizer(Protocol):
     """Structural view of the identifier normalizer contract.
 
-    Parameter name mirrors ``dlt.common.normalizers.naming.NamingConvention``
-    (``identifier``, not ``name``) so a real dlt NamingConvention structurally
-    satisfies this Protocol under strict type checkers that enforce
-    positional-or-keyword parameter-name compatibility.
+    Parameter names mirror ``dlt.common.normalizers.naming.NamingConvention``
+    (``identifier`` and ``path``, not ``name``) so a real dlt NamingConvention
+    structurally satisfies this Protocol under strict type checkers that
+    enforce positional-or-keyword parameter-name compatibility.
     """
 
     def normalize_identifier(self, identifier: str) -> str: ...
+
+    def normalize_path(self, path: str) -> str: ...
+
+    def normalize_tables_path(self, path: str) -> str: ...
+
+    def normalize_table_identifier(self, identifier: str) -> str: ...
 
 
 # Fallback when a source instance cannot be built (test fakes, orphan sources,
@@ -110,13 +116,13 @@ def destination_column_names(
     model: "type[pydantic.BaseModel]",
     naming: "_Normalizer | None" = None,
 ) -> set[str]:
-    """Return the set of destination column names a model's fields will produce.
+    """Return the destination-side name of each model field.
 
-    One name per field: the name dlt writes (``destination_field_names`` —
-    the alias if set, else the attribute name), run through the same
-    normalizer dlt uses on the write. A Pydantic attribute `startTime` lands
-    at the destination as `start_time`; a `Field(alias="FROM")` alias lands as
-    `from`, and its attribute name is not a column. Callers (the additive and
+    One name per field (``destination_field_names`` — the alias if set, else
+    the attribute name, which is dlt's rule for naming a field's column), run
+    through the same normalizer dlt uses on the write. A Pydantic attribute
+    `startTime` becomes `start_time`; a `Field(alias="FROM")` field becomes
+    `from`, and its attribute name is not used. Callers (the additive and
     removal detectors) diff against and query live destination columns, so a
     name dlt never writes would read as drift or fail the query.
 
