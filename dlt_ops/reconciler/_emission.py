@@ -281,11 +281,12 @@ def emit_findings(sink: "AlertSink", findings: list) -> None:
                 )
             except Exception:
                 logger.exception("alert sink emit_error itself failed")
-            logger.exception(
-                "emit_drift (%s) failed for %s.%s",
+            logger.warning(
+                "emit_drift (%s) failed for %s.%s: %s",
                 finding.kind.value,
                 finding.source_name,
                 finding.resource_name,
+                exc,
             )
 
 

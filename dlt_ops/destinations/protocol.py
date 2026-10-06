@@ -96,10 +96,16 @@ class ColumnInfo:
     ``information_schema.columns`` reports it, never normalized to a common
     vocabulary — two destinations spell the same logical type differently, so
     callers comparing types must compare within one destination.
+
+    ``is_partition_column`` is True for the column the destination partitions
+    the table on. Destinations that do not report partitioning leave it False.
+    It is keyword-only, so an adapter's ``ColumnInfo`` subclass may still add
+    fields without defaults.
     """
 
     name: str
     data_type: str
+    is_partition_column: bool = attrs.field(default=False, kw_only=True)
 
 
 @runtime_checkable

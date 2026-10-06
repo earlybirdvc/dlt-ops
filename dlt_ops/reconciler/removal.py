@@ -1,7 +1,7 @@
 """Removal-drift detection: a model column's non-null coverage collapsed.
 
 Windowed non-null-coverage comparison against the resource's destination
-table, on the configured ``[dlt_ops] load_timestamp_column``:
+table, on the table's time column:
 
 - **recent**: last ``recent_window_hours`` (default 6) of loads.
 - **baseline**: ``baseline_window_days``-day window (default 7) ending
@@ -21,6 +21,10 @@ drift is silent at ingest — the reconciler is the only observability layer.
 when ``load_timestamp_column`` is unset, detection is skipped and the result
 carries a warning (``ReconcileResult.warnings``) so ``validate``/CLI flows
 can surface the degradation.
+
+**Time column per table.** Each table is windowed on its own time column,
+resolved by ``_live_tables.resolve_time_column``. A resource whose table is
+absent is skipped, and so is a table with no time column, with an INFO log.
 
 Batching: per resource, one query computes recent+baseline coverage for
 every column in one shot — ``1`` query per resource instead of ``N_cols``.
@@ -48,11 +52,11 @@ from typing import TYPE_CHECKING, cast
 
 from dlt_ops.config import ProjectConfig
 from dlt_ops.discovery.models import SourceInfo
+from dlt_ops.reconciler._coverage import build_coverage_query
+from dlt_ops.reconciler._live_tables import fetch_live_tables, resolve_time_column
 from dlt_ops.reconciler.common import (
     DetectionContext,
     build_reproduce_sql,
-    canonical_ident,
-    canonical_table_ref,
     configured_load_timestamp_column,
     destination_column_names,
     resolve_source_naming,
@@ -65,7 +69,8 @@ from dlt_ops.reconciler.models import DriftFinding, DriftKind, ReconcileResult
 if TYPE_CHECKING:
     from typing import Any
 
-    from dlt_ops.reconciler.protocols import AlertSink, QueryRunner
+    from dlt_ops.reconciler._live_tables import LiveTable
+    from dlt_ops.reconciler.protocols import AlertSink, QueryRunner, SchemaFetcher
 
 
 logger = logging.getLogger(__name__)
@@ -84,78 +89,12 @@ LOAD_TIMESTAMP_UNSET_WARNING = (
 )
 
 
-def _build_coverage_query(
-    dataset: str,
-    resource_name: str,
-    columns: tuple[str, ...],
-    *,
-    load_timestamp_column: str,
-    recent_start: datetime,
-    baseline_start: datetime,
-) -> "tuple[str, tuple[Any, ...]]":
-    """One canonical query: all columns' coverage for recent + baseline windows.
-
-    An inner projection tags every row with ``in_recent`` / ``in_baseline``
-    window flags (bounds parameter-bound, so the SQL text is value-free);
-    the outer SELECT computes NULL-safe coverage ratios per column in
-    transpilable form (``CAST(SUM(CASE ...) AS DOUBLE) / NULLIF(SUM(...), 0)``
-    — a zero-row window divides by NULL and yields NULL, matching the
-    "can't distinguish idle from dropped" contract in ``_is_removal``).
-
-    The inner ``WHERE <ts> >= ?`` (baseline start) is a hard lower bound on
-    the load-timestamp column so time-partitioned destinations prune to the
-    trailing baseline window — every reconcile pass then reads at most
-    ``baseline_window_days``' worth of partitions per resource.
-
-    Result columns come in pairs, positionally: ``(recent, baseline)`` per
-    input column, in input order.
-    """
-    ts = canonical_ident(load_timestamp_column)
-    inner_projection = ", ".join(canonical_ident(col) for col in columns)
-    inner = (
-        f"SELECT {inner_projection}, "
-        f"CASE WHEN {ts} >= ? THEN 1 ELSE 0 END AS in_recent, "
-        f"CASE WHEN {ts} >= ? AND {ts} <= ? THEN 1 ELSE 0 END AS in_baseline "
-        f"FROM {canonical_table_ref(dataset, resource_name)} "
-        f"WHERE {ts} >= ?"
-    )
-    per_col = []
-    for col in columns:
-        safe = canonical_ident(col)
-        alias = _ident_alias(col)
-        per_col.append(
-            f"CAST(SUM(CASE WHEN {safe} IS NOT NULL AND in_recent = 1 THEN 1 ELSE 0 END) AS DOUBLE)"
-            f" / NULLIF(SUM(in_recent), 0) AS recent_{alias}"
-        )
-        per_col.append(
-            f"CAST(SUM(CASE WHEN {safe} IS NOT NULL AND in_baseline = 1 THEN 1 ELSE 0 END) AS DOUBLE)"
-            f" / NULLIF(SUM(in_baseline), 0) AS baseline_{alias}"
-        )
-    select_list = ",\n  ".join(per_col)
-    sql = f"SELECT\n  {select_list}\nFROM ({inner}) AS windowed"
-    params = (recent_start, baseline_start, recent_start, baseline_start)
-    return sql, params
-
-
-def _ident_alias(col: str) -> str:
-    """Sanitise a column name for use as a SQL alias.
-
-    ``a-b`` / ``a.b`` / ``a b`` all become ``a_b``. Purely alias-level — the
-    original column reference in the coverage expression stays intact via
-    canonical quoting. Callers feed in destination-normalized names via
-    ``destination_column_names``, which is already snake_case-clean; this
-    pass is defensive against a future naming-convention override that might
-    leak a non-identifier character.
-    """
-    return "".join(c if c.isalnum() or c == "_" else "_" for c in col)
-
-
 def _detect_removal_for_resource(
     source: SourceInfo,
     resource_name: str,
+    live_table: "LiveTable",
     *,
     runner: "QueryRunner",
-    dataset: str,
     load_timestamp_column: str,
     baseline_threshold: float,
     recent_threshold: float,
@@ -168,11 +107,18 @@ def _detect_removal_for_resource(
     ``naming`` is the destination-side NamingConvention resolved once at the
     source level via ``resolve_source_naming`` — threaded down so every
     resource's model-column set is normalized with the same convention dlt
-    actually uses on the write path.
+    actually uses on the write path. ``load_timestamp_column`` is the
+    configured name; the table's own time column is resolved from it and
+    ``live_table``'s columns.
     """
     model = resource_pydantic_model(source, resource_name)
     if model is None:
         logger.debug("resource %s.%s has no Pydantic columns= — skipping removal detection", source.name, resource_name)
+        return None
+
+    time_column = resolve_time_column(live_table.columns, load_timestamp_column, naming)
+    if time_column is None:
+        logger.info("table %s.%s has no time column — skipping removal detection", live_table.dataset, live_table.name)
         return None
 
     # Destination-side (post-dlt-normalize) so the coverage projection targets
@@ -184,11 +130,11 @@ def _detect_removal_for_resource(
         return None
 
     now = datetime.now(tz=UTC)
-    sql, params = _build_coverage_query(
-        dataset,
-        resource_name,
+    sql, params = build_coverage_query(
+        live_table.dataset,
+        live_table.name,
         known_columns,
-        load_timestamp_column=load_timestamp_column,
+        time_column=time_column,
         recent_start=now - timedelta(hours=recent_window_hours),
         baseline_start=now - timedelta(days=baseline_window_days),
     )
@@ -229,11 +175,11 @@ def _detect_removal_for_resource(
         sample_values={col: [] for col in drifted_tuple},
         first_seen_at=first_seen_at,
         reproduce_sql=build_reproduce_sql(
-            dataset,
-            resource_name,
+            live_table.dataset,
+            live_table.name,
             drifted_tuple,
             first_seen_at=first_seen_at,
-            load_timestamp_column=load_timestamp_column,
+            time_column=time_column,
         ),
     )
 
@@ -260,6 +206,7 @@ def _is_removal(
 def _detect_removal_drift(
     source: SourceInfo,
     *,
+    fetcher: "SchemaFetcher",
     runner: "QueryRunner",
     dataset: str,
     load_timestamp_column: str,
@@ -273,20 +220,26 @@ def _detect_removal_drift(
 
     Never emits findings — the caller (``detect_removal``) handles emission
     outside the traversal. Per-resource failures are trapped and reported
-    through the sink's error path but don't stop the sweep.
+    through the sink's error path but don't stop the sweep; a schema-fetch
+    failure is reported once and propagates to the caller as ``result.error``.
     """
     # Resolve the source's own NamingConvention once so every resource shares
-    # a single lookup and every SQL projection targets the exact column names
-    # dlt actually wrote — not a hardcoded default.
+    # a single lookup and every SQL reference targets the exact table and
+    # column names dlt actually wrote — not a hardcoded default.
     naming = resolve_source_naming(source)
+    live_tables = fetch_live_tables(source, fetcher=fetcher, dataset=dataset, naming=naming, sink=sink)
     findings: list[DriftFinding] = []
     for resource_name in source.resources:
+        live_table = live_tables.get(resource_name)
+        if live_table is None:
+            continue
+
         try:
             finding = _detect_removal_for_resource(
                 source,
                 resource_name,
+                live_table,
                 runner=runner,
-                dataset=dataset,
                 load_timestamp_column=load_timestamp_column,
                 baseline_threshold=baseline_threshold,
                 recent_threshold=recent_threshold,
@@ -296,7 +249,7 @@ def _detect_removal_drift(
             )
         except Exception as exc:
             sink.emit_error(exc, source_name=source.name, resource_name=resource_name, context="detect_removal")
-            logger.exception("removal detection failed for %s.%s", source.name, resource_name)
+            logger.warning("removal detection failed for %s.%s: %s", source.name, resource_name, exc)
             continue
 
         if finding is None:
@@ -323,6 +276,7 @@ def _detect_removal_inner(
     source_name: str,
     *,
     dry_run: bool,
+    fetcher: "SchemaFetcher | None",
     runner: "QueryRunner | None",
     dataset: str | None,
     sources: dict[str, SourceInfo] | None,
@@ -336,14 +290,15 @@ def _detect_removal_inner(
 ) -> ReconcileResult:
     """Detection + emission for one source WITHOUT flushing the sink.
 
-    Runs on the shared driver with no ``needs_fetcher``: coverage windows are
-    computed by query, so an injected runner alone is enough and no destination
-    boundary is opened for a schema fetch this detector never makes.
+    ``_detect_removal_drift`` reports its own failures through the sink
+    (per-resource errors under ``detect_removal``, a schema-fetch failure
+    under ``fetch_schemas``); the driver only maps a raise to ``result.error``.
     """
 
     def _detect(ctx: DetectionContext) -> list[DriftFinding]:
         return _detect_removal_drift(
             ctx.source,
+            fetcher=ctx.fetcher,
             runner=ctx.runner,
             dataset=ctx.dataset,
             # The precheck already rejected an unset column for this run.
@@ -361,12 +316,12 @@ def _detect_removal_inner(
         dry_run=dry_run,
         sink=sink,
         runner=runner,
+        fetcher=fetcher,
         dataset=dataset,
         sources=sources,
         project_root=project_root,
         project_config=project_config,
         precheck=_require_load_timestamp_column,
-        source_error_context="reconcile_removal",
     )
 
 
@@ -374,6 +329,7 @@ def detect_removal(
     source_name: str,
     *,
     dry_run: bool = False,
+    fetcher: "SchemaFetcher | None" = None,
     runner: "QueryRunner | None" = None,
     dataset: str | None = None,
     sources: dict[str, SourceInfo] | None = None,
@@ -396,9 +352,10 @@ def detect_removal(
 
     Callers can widen or tighten the windows and thresholds without
     patching this module — every knob is a keyword-only parameter with the
-    canonical default exported as ``DEFAULT_*``. Prod callers pass
-    ``runner=None`` and the reconciler opens the source's own resolved
-    destination through the DestinationAdapter boundary.
+    canonical default exported as ``DEFAULT_*``. Prod callers pass neither
+    ``fetcher`` nor ``runner`` and the reconciler opens the source's own
+    resolved destination through the DestinationAdapter boundary; the boundary
+    is skipped only when both are injected.
     """
     return with_resolved_sink(
         sink,
@@ -408,6 +365,7 @@ def detect_removal(
         run=lambda resolved_sink: _detect_removal_inner(
             source_name,
             dry_run=dry_run,
+            fetcher=fetcher,
             runner=runner,
             dataset=dataset,
             sources=sources,

@@ -61,15 +61,15 @@ Three column families are deliberately not drift:
 
 - **dlt's own system columns** (anything prefixed `_dlt_`) are skipped by prefix.
 - **Columns your infrastructure stamps on every row** are subtracted via config — project-wide `[dlt_ops] injected_columns`, per-source `[sources.<X>.dlt_ops] injected_columns`, and the configured `load_timestamp_column`, which is auto-ignored because the runner stamps it (it is never part of a Pydantic model by design). Adding a new stamped key is a one-line TOML edit, not a reconciler change.
-- **A resource with no Pydantic `columns=` model** has nothing to diff against, so it is skipped — as is a resource whose table doesn't exist at the destination yet.
+- **A resource with no Pydantic `columns=` model** has nothing to diff against, so it is skipped — as is a resource whose table doesn't exist at the destination yet. Both detectors skip these resources, so a declared resource that never landed produces no query and no error. A resource's table is looked up under the resource name normalized with the source's naming convention (the name dlt uses when the resource sets no `table_name`), in the configured dataset normalized with the same convention (dlt's default dataset-name normalization), so a resource `OrderItems` in dataset `RAW_ORDERS` is found as table `order_items` in `raw_orders`.
 
-One subtlety does the correctness heavy lifting: both sides of the diff speak **destination-side names**. The model's attribute names and aliases are run through the same dlt naming convention the write path uses — the source's own schema convention, not a hardcoded default — so a Pydantic field `startTime` matches the persisted `start_time` column instead of surfacing as false-positive drift.
+One subtlety does the correctness heavy lifting: both sides of the diff speak **destination-side names**. For each model field, the reconciler uses one name: its alias if set, else its attribute name. This is the rule dlt uses to name a field's column when it builds table columns from a model. That name is run through the same dlt naming convention the write path uses — the source's own schema convention, not a hardcoded default — so a Pydantic field `startTime` matches the persisted `start_time` column instead of surfacing as false-positive drift. A `validation_alias` or `serialization_alias` does not add a name, and the attribute name of an aliased field is not used.
 
 ## Removal detection: `--include-removal`
 
 **Additive drift is half the story.** A provider can stop sending a field without any schema change: the column still exists, ingestion accepts `null` under every contract mode, and nothing fails — the data just goes dark.
 
-`--include-removal` adds a windowed non-null-coverage scan over the model's columns: for each column, one query computes the fraction of non-null values in the **recent** window (last 6 hours of loads) and in the **baseline** window (the 7-day window ending where the recent one begins), timestamped on the configured `[dlt_ops] load_timestamp_column`. A column whose baseline coverage exceeded 20% and whose recent coverage fell below 1% went dark.
+`--include-removal` adds a windowed non-null-coverage scan over the model's columns: for each column, one query computes the fraction of non-null values in the **recent** window (last 6 hours of loads) and in the **baseline** window (the 7-day window ending where the recent one begins), timestamped on the table's [time column](#time-column-per-table). A column whose baseline coverage exceeded 20% and whose recent coverage fell below 1% went dark.
 
 Simulating exactly that — backdating the existing rows into the baseline window, then appending fresh loads where `actor_login` (a nullable model column with 80% historical coverage) is only `NULL`:
 
@@ -115,6 +115,18 @@ Source: demo_events (removal)  |  Findings: 0  |  Duration: 0.26s
   ! removal detection skipped: [dlt_ops] load_timestamp_column is not set — windowed coverage needs a time axis. Set it to enable removal-drift detection.
 ```
 
+### Time column per table
+
+**Both detectors pick a time column for each table, in this order:**
+
+1. The configured `load_timestamp_column`, normalized with the source's naming convention, if the table has that column.
+2. Otherwise, the column the destination reports as the table's partition column. The BigQuery adapter reads it from `INFORMATION_SCHEMA.COLUMNS`; the DuckDB, Postgres, and derived adapters report no partition column.
+3. Otherwise, the table has no time column.
+
+Removal detection skips a table with no time column: it logs one INFO line naming the table, runs no query, and reports no error. Additive detection uses the same time column to window and order its sample query, and every `reproduce` SELECT filters on it. A table without one gets an unordered `LIMIT 5` for both.
+
+The windowed queries compare the time column with a timestamp parameter, so the destination must support that comparison for the column it reports as the partition column. An unsupported comparison is reported for that table only, through the sink's error path, and the sweep continues: removal yields no coverage for the table, while additive still reports its finding, without samples.
+
 ## Findings and alert-sink routing
 
 **Every finding and every reconciler-internal error goes through the `AlertSink` protocol — the contract of the `alert_sink` plugin axis (`emit_drift`, `emit_error`, `flush`), so no alerting SDK ever loads unless you configured its sink.** Sinks are selected per project, every configured sink receives every event, and per-sink non-secret options live in a table named after the sink:
@@ -150,8 +162,10 @@ Because it can only observe, its exit code reports on the *reconciler*, not on y
 Failures are isolated at every level so one broken resource cannot hide drift elsewhere:
 
 - a per-resource failure is reported through the sink's error path and the sweep continues;
-- a source-level failure lands in that source's `error` field;
+- a source-level failure lands in that source's `error` field; a failed schema fetch is also reported once through the sink's error path;
 - `reconcile --all` gives every discovered source its own result block, each resolving — and reconciling against — its own destination and dataset from the config chain, so multi-destination projects sweep without cross-destination credentials.
+
+**The sink owns the error report.** When the reconciler hands an error to the sink's error path, it also logs one WARNING line with the exception text and no traceback. The `logging` sink writes its own ERROR line with the traceback. Because the reconciler's own line is a WARNING, a process-wide logging integration that turns ERROR records into events, such as Sentry's, does not report the same failure a second time.
 
 A `reconcile --all` sweep, one source drifted and one clean:
 

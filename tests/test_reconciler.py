@@ -27,8 +27,10 @@ import pytest
 from dlt_ops import Schedule, SourceConfig, SourceInfo
 from dlt_ops.config import ProjectConfig
 from dlt_ops.destinations import ColumnInfo
+from dlt_ops.reconciler import _coverage as coverage_mod
 from dlt_ops.reconciler import _emission as emission_mod
 from dlt_ops.reconciler import additive as additive_mod
+from dlt_ops.reconciler import common as common_mod
 from dlt_ops.reconciler import removal as removal_mod
 from dlt_ops.reconciler.models import DriftFinding, DriftKind
 from dlt_ops.reconciler.protocols import TableRef
@@ -50,11 +52,9 @@ class OrderItemModel(pydantic.BaseModel):
 class AliasedModel(pydantic.BaseModel):
     """Exercises a Pydantic-v2 alias.
 
-    The alias ``camelCase`` and the attribute ``snake_case`` both flow through
-    dlt's destination-side ``snake_case`` normalizer, so the destination
-    column that actually lands is ``camel_case`` — the reconciler's
-    known-column set must include the normalized form (not the raw alias) to
-    match.
+    dlt writes the alias ``camelCase``, normalized by the destination-side
+    ``snake_case`` convention, so the column that lands is ``camel_case``. The
+    attribute name ``snake_case`` never becomes a column.
     """
 
     model_config = pydantic.ConfigDict(populate_by_name=True)
@@ -83,8 +83,8 @@ class KeywordAliasModel(pydantic.BaseModel):
     ``FROM`` is a real upstream column but ``from`` is a Python keyword, so
     the model uses attribute ``from_`` with ``alias="FROM"``. dlt's
     destination normalizer lowercases the alias to the destination column
-    ``from`` — the attribute-name normalization ``from_ -> fromx`` is a red
-    herring; the alias path is what has to match.
+    ``from``. The attribute name (normalized: ``fromx``) never becomes a
+    column.
     """
 
     id: int
@@ -402,7 +402,9 @@ class TestAdditiveDetection:
     def test_aliased_model_field_matches_normalized_column(self):
         """`Field(alias="camelCase")` lands as `camel_case` after dlt's
         destination-side normalizer — the persisted column must not read as
-        drift."""
+        drift. The attribute name is not a destination column, so it is not
+        in the known set."""
+        assert common_mod.destination_column_names(AliasedModel) == {"api_id", "camel_case"}
         source = _make_source(resources={"aliased_res": AliasedModel})
         fetcher = FakeSchemaFetcher({"aliased_res": _cols("api_id", "camel_case")})
         result = self._reconcile(source, fetcher, FakeQueryRunner())
@@ -453,15 +455,21 @@ class TestAdditiveDetection:
             def normalize_identifier(self, name: str) -> str:
                 return name.upper()
 
+            normalize_path = normalize_identifier
+
+            normalize_tables_path = normalize_identifier
+            normalize_table_identifier = normalize_identifier
+
         source = _make_source(resources={"order_items": OrderItemModel}, naming=UppercaseNaming())
         fetcher = FakeSchemaFetcher(
             {
-                "order_items": _cols(
+                "ORDER_ITEMS": _cols(
                     "API_ID", "ORDER_ID", "NAME", "DISCOUNT_CODE", ("LOADED_AT", "TIMESTAMP"), "REGION_ID"
                 )
             }
         )
         result = self._reconcile(source, fetcher, FakeQueryRunner())
+        assert result.error is None
         assert result.findings == ()
 
     def test_uppercased_alias_matches_lowercased_column(self):
@@ -470,14 +478,25 @@ class TestAdditiveDetection:
         Regression pin: `from_ = Field(alias="FROM")` was in the model, but
         the destination persisted `from` (lowercased). Comparing `{"from_",
         "FROM"}` against `{"from"}` would flag the column as additive drift.
-        The alias normalizes to `from` cleanly; the attribute name's `from_`
-        -> `fromx` normalization is intentionally allowed to be a dead end
-        because the alias path covers the real destination column.
+        The alias normalizes to `from`. The attribute name normalizes to
+        `fromx`, a column dlt never writes — removal would query it and fail.
         """
+        columns = common_mod.destination_column_names(KeywordAliasModel)
+        assert "fromx" not in columns
+        assert columns == {"id", "from"}
         source = _make_source(resources={"share_emails": KeywordAliasModel}, injected_columns=())
         fetcher = FakeSchemaFetcher({"share_emails": _cols(("id", "INTEGER"), "from", ("loaded_at", "TIMESTAMP"))})
         result = self._reconcile(source, fetcher, FakeQueryRunner())
         assert result.findings == ()
+
+    def test_underscore_alias_is_the_only_known_name(self):
+        """A leading-underscore alias is the column dlt writes; the attribute name is not."""
+
+        class CursorModel(pydantic.BaseModel):
+            id: int
+            cursor_ts: datetime | None = pydantic.Field(default=None, alias="_cursor_ts")
+
+        assert common_mod.destination_column_names(CursorModel) == {"id", "_cursor_ts"}
 
     def test_unset_load_timestamp_degrades_sampling(self):
         """No load-timestamp column → unordered LIMIT-5 sampling and a
@@ -586,7 +605,7 @@ class TestAdditiveDetection:
 
         original = additive_mod._detect_resource_drift
 
-        def flaky(src, res, cols, *, runner, dataset, ignored_columns, naming, load_timestamp_column):
+        def flaky(src, res, cols, *, runner, ignored_columns, naming, load_timestamp_column):
             if res == "bad_res":
                 raise RuntimeError("simulated per-resource failure")
             return original(
@@ -594,7 +613,6 @@ class TestAdditiveDetection:
                 res,
                 cols,
                 runner=runner,
-                dataset=dataset,
                 ignored_columns=ignored_columns,
                 naming=naming,
                 load_timestamp_column=load_timestamp_column,
@@ -642,11 +660,16 @@ class TestRemovalDetection:
         project_config: ProjectConfig | None = None,
         sink: Any = None,
         dry_run: bool = True,
+        fetcher: Any = None,
         **kwargs: Any,
     ):
+        """Every resource table exists with the order-items columns unless ``fetcher`` says otherwise."""
+        if fetcher is None:
+            fetcher = FakeSchemaFetcher({name: ORDER_ITEM_LIVE for name in source.resources})
         return removal_mod.detect_removal(
             source.name,
             dry_run=dry_run,
+            fetcher=fetcher,
             runner=runner,
             dataset="raw",
             sources={source.name: source},
@@ -728,11 +751,11 @@ class TestRemovalDetection:
         now = datetime.now(tz=UTC)
         recent_start = now - timedelta(hours=6)
         baseline_start = now - timedelta(days=7)
-        sql, params = removal_mod._build_coverage_query(
+        sql, params = coverage_mod.build_coverage_query(
             "raw",
             "order_items",
             ("api_id", "discount_code"),
-            load_timestamp_column="loaded_at",
+            time_column="loaded_at",
             recent_start=recent_start,
             baseline_start=baseline_start,
         )
@@ -749,11 +772,11 @@ class TestRemovalDetection:
         import sqlglot
 
         now = datetime.now(tz=UTC)
-        sql, _ = removal_mod._build_coverage_query(
+        sql, _ = coverage_mod.build_coverage_query(
             "raw",
             "order_items",
             ("api_id", "discount_code"),
-            load_timestamp_column="loaded_at",
+            time_column="loaded_at",
             recent_start=now - timedelta(hours=6),
             baseline_start=now - timedelta(days=7),
         )
@@ -774,10 +797,16 @@ class TestRemovalDetection:
             def normalize_identifier(self, name: str) -> str:
                 return name.upper()
 
+            normalize_path = normalize_identifier
+
+            normalize_tables_path = normalize_identifier
+            normalize_table_identifier = normalize_identifier
+
         source = _make_source(resources={"order_items": OrderItemModel}, naming=UppercaseNaming())
         runner = FakeQueryRunner()
+        fetcher = FakeSchemaFetcher({"ORDER_ITEMS": _cols("API_ID", "ORDER_ID", ("LOADED_AT", "TIMESTAMP"))})
 
-        result = self._detect(source, runner)
+        result = self._detect(source, runner, fetcher=fetcher)
 
         assert result.error is None
         assert result.findings == ()
@@ -879,16 +908,26 @@ class TestSharedDetectionDriver:
         assert additive_result.error == removal_result.error
         assert "No dataset configured" in additive_result.error
 
-    def test_removal_skips_the_boundary_on_an_injected_runner_alone(self):
-        """Removal reads no live schema, so a runner is the whole dependency.
+    def test_removal_skips_the_boundary_only_when_runner_and_fetcher_are_injected(self):
+        """Removal reads live schemas too, so it needs both stand-ins to skip the boundary.
 
         The project config resolves no destination, so opening the boundary
-        would surface as an error — its absence is the assertion.
+        surfaces as an error — its absence with both stand-ins, and its
+        presence with a runner alone, are the assertions.
         """
         runner = FakeQueryRunner()
-        result = removal_mod.detect_removal(self.SOURCE.name, runner=runner, dataset="raw", **self._both())
+        fetcher = FakeSchemaFetcher({"order_items": ORDER_ITEM_LIVE})
+        result = removal_mod.detect_removal(
+            self.SOURCE.name, fetcher=fetcher, runner=runner, dataset="raw", **self._both()
+        )
         assert result.error is None
         assert runner.queries  # detection actually ran
+
+        runner_only = removal_mod.detect_removal(
+            self.SOURCE.name, runner=FakeQueryRunner(), dataset="raw", **self._both()
+        )
+        assert runner_only.error is not None
+        assert "No destination configured" in runner_only.error
 
     def test_additive_needs_a_fetcher_before_it_can_skip_the_boundary(self):
         """A runner alone is not enough: the schema fetch has no stand-in, so
@@ -1021,6 +1060,7 @@ class TestEmissionSeam:
         result = removal_mod.detect_removal(
             "orders_api",
             dry_run=False,
+            fetcher=FakeSchemaFetcher({"order_items": ORDER_ITEM_LIVE}),
             runner=runner,
             dataset="raw",
             sources={"orders_api": source},

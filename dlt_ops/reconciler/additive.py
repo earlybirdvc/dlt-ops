@@ -38,12 +38,13 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from dlt_ops.config import ProjectConfig, find_project_root, load_project_config
 from dlt_ops.discovery.models import SourceInfo
 from dlt_ops.discovery.scanner import discover_sources
 from dlt_ops.reconciler._emission import resolve_sink
+from dlt_ops.reconciler._live_tables import fetch_live_tables, resolve_time_column
 from dlt_ops.reconciler.common import (
     DetectionContext,
     build_reproduce_sql,
@@ -58,19 +59,18 @@ from dlt_ops.reconciler.common import (
     with_resolved_sink,
 )
 from dlt_ops.reconciler.models import DriftFinding, DriftKind, ReconcileResult
-from dlt_ops.reconciler.protocols import TableRef
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from dlt_ops.destinations import ColumnInfo
+    from dlt_ops.reconciler._live_tables import LiveTable
     from dlt_ops.reconciler.protocols import AlertSink, QueryRunner, SchemaFetcher
 
 
 logger = logging.getLogger(__name__)
 
 
-# Sample lookback: a hard lower bound on the load-timestamp column so
+# Sample lookback: a hard lower bound on the table's time column so
 # time-partitioned destinations prune to the trailing week instead of
 # full-scanning to resolve the ORDER BY. Matches removal.py's coverage bound.
 _SAMPLE_WINDOW_DAYS = 7
@@ -90,19 +90,19 @@ def is_dlt_system_column(name: str) -> bool:
 def _fetch_sample_values(
     runner: "QueryRunner",
     dataset: str,
-    resource_name: str,
+    table: str,
     columns: tuple[str, ...],
     *,
-    load_timestamp_column: str | None,
+    time_column: str | None,
 ) -> "Mapping[str, list[Any]]":
     """Fetch up to 5 recent non-null values per drifted column.
 
     One query per resource (not per column) — the SELECT list carries every
     drifted column. Canonical dialect, executed through the injected runner
-    (the DestinationAdapter boundary in prod). When a load-timestamp column
-    is configured the sample is the most recent shape (windowed + ordered on
-    it, bounds parameter-bound); without one the query degrades to an
-    unordered ``LIMIT 5``.
+    (the DestinationAdapter boundary in prod). When the table has a time
+    column the sample is the most recent shape (windowed + ordered on it,
+    bounds parameter-bound); without one the query degrades to an unordered
+    ``LIMIT 5``.
 
     Empty return on any error (query failure, permission gap, resource not
     yet materialised) — the alert still fires without the samples;
@@ -113,9 +113,9 @@ def _fetch_sample_values(
         return {}
 
     projection = ", ".join(canonical_ident(col) for col in columns)
-    table_ref = canonical_table_ref(dataset, resource_name)
-    if load_timestamp_column:
-        ts = canonical_ident(load_timestamp_column)
+    table_ref = canonical_table_ref(dataset, table)
+    if time_column:
+        ts = canonical_ident(time_column)
         sql = f"SELECT {projection} FROM {table_ref} WHERE {ts} >= ? ORDER BY {ts} DESC LIMIT {_SAMPLE_LIMIT}"
         params: tuple[Any, ...] = (datetime.now(tz=UTC) - timedelta(days=_SAMPLE_WINDOW_DAYS),)
     else:
@@ -125,7 +125,7 @@ def _fetch_sample_values(
     try:
         rows = runner.query(sql, params)
     except Exception:
-        logger.warning("sample-values query failed for %s.%s — continuing without samples", dataset, resource_name)
+        logger.warning("sample-values query failed for %s.%s — continuing without samples", dataset, table)
         return {}
 
     samples: dict[str, list[Any]] = {col: [] for col in columns}
@@ -147,10 +147,9 @@ def _fetch_sample_values(
 def _detect_resource_drift(
     source: SourceInfo,
     resource_name: str,
-    live_columns: "tuple[ColumnInfo, ...]",
+    live_table: "LiveTable",
     *,
     runner: "QueryRunner",
-    dataset: str,
     ignored_columns: frozenset[str],
     naming: "Any",
     load_timestamp_column: str | None,
@@ -165,7 +164,9 @@ def _detect_resource_drift(
     ``naming`` is the destination-side NamingConvention resolved once at the
     source level via ``resolve_source_naming`` — threaded down so each
     resource's model-column set is normalized with the same convention dlt
-    actually uses on the write path.
+    actually uses on the write path. ``load_timestamp_column`` is the
+    configured name; the table's own time column is resolved from it and
+    ``live_table``'s columns.
     """
     model = resource_pydantic_model(source, resource_name)
     if model is None:
@@ -174,8 +175,8 @@ def _detect_resource_drift(
         )
         return None
 
-    live_names = {col.name for col in live_columns}
-    live_types = {col.name: col.data_type for col in live_columns}
+    live_names = {col.name for col in live_table.columns}
+    live_types = {col.name: col.data_type for col in live_table.columns}
     # Both sides must speak destination-side (post-dlt-normalize) names.
     # `destination_column_names` runs the model's attribute names + aliases
     # through the same NamingConvention dlt uses on the write — otherwise a
@@ -198,7 +199,8 @@ def _detect_resource_drift(
 
     drifted = tuple(sorted(drift))
     inferred_types = tuple(live_types.get(col, "") for col in drifted)
-    samples = _fetch_sample_values(runner, dataset, resource_name, drifted, load_timestamp_column=load_timestamp_column)
+    time_column = resolve_time_column(live_table.columns, load_timestamp_column, naming)
+    samples = _fetch_sample_values(runner, live_table.dataset, live_table.name, drifted, time_column=time_column)
     first_seen_at = datetime.now(tz=UTC)
 
     return DriftFinding(
@@ -211,11 +213,11 @@ def _detect_resource_drift(
         sample_values=samples,
         first_seen_at=first_seen_at,
         reproduce_sql=build_reproduce_sql(
-            dataset,
-            resource_name,
+            live_table.dataset,
+            live_table.name,
             drifted,
             first_seen_at=first_seen_at,
-            load_timestamp_column=load_timestamp_column,
+            time_column=time_column,
         ),
     )
 
@@ -232,53 +234,36 @@ def _detect_source_drift(
     """Traverse a source's resources and return every additive drift finding.
 
     Pure detection — never emits findings. Per-resource errors are trapped
-    and reported through the sink's error path; source-level failures
-    (fetcher raises) propagate to the caller so the public
-    ``reconcile_source`` wrapper surfaces them via ``result.error``.
+    and reported through the sink's error path; a schema-fetch failure is
+    reported once and propagates to the caller so the public
+    ``reconcile_source`` wrapper surfaces it via ``result.error``.
     """
-    refs = [TableRef(dataset=dataset, table=resource_name) for resource_name in source.resources]
-    try:
-        schemas = fetcher.fetch(refs)
-    except Exception as exc:
-        sink.emit_error(exc, source_name=source.name, context="fetch_schemas")
-        logger.exception("schema fetch failed for source=%s", source.name)
-        raise
-
     # Resolve the source's own NamingConvention once (source_fn()-backed) so
-    # every resource in the loop normalizes model names with the exact
-    # convention dlt uses on the write path — not a hardcoded default.
+    # every resource in the loop normalizes table and model names with the
+    # exact convention dlt uses on the write path — not a hardcoded default.
     naming = resolve_source_naming(source)
+    live_tables = fetch_live_tables(source, fetcher=fetcher, dataset=dataset, naming=naming, sink=sink)
     ignored_columns = ignored_columns_for(source, naming, project_config)
     load_timestamp_column = configured_load_timestamp_column(project_config)
     findings: list[DriftFinding] = []
     for resource_name in source.resources:
-        # No matching destination table — the resource has never landed OR
-        # the dataset is stale. Both are "no additive drift possible"; log
-        # and skip so the sweep continues.
-        columns = schemas.get(TableRef(dataset=dataset, table=resource_name))
-        if columns is None:
-            logger.debug(
-                "resource %s.%s not present in %s — skipping additive detection",
-                source.name,
-                resource_name,
-                dataset,
-            )
+        live_table = live_tables.get(resource_name)
+        if live_table is None:
             continue
 
         try:
             finding = _detect_resource_drift(
                 source,
                 resource_name,
-                columns,
+                live_table,
                 runner=runner,
-                dataset=dataset,
                 ignored_columns=ignored_columns,
                 naming=naming,
                 load_timestamp_column=load_timestamp_column,
             )
         except Exception as exc:
             sink.emit_error(exc, source_name=source.name, resource_name=resource_name, context="detect_resource_drift")
-            logger.exception("additive detection failed for %s.%s", source.name, resource_name)
+            logger.warning("additive detection failed for %s.%s: %s", source.name, resource_name, exc)
             continue
 
         if finding is None:
@@ -306,18 +291,16 @@ def _reconcile_source_inner(
     call; ``reconcile_all`` batches N calls and flushes once at the end so
     a full sweep pays the drain cost once rather than per-source.
 
-    No ``source_error_context``: ``_detect_source_drift`` already reported any
-    failure through the sink (per-resource errors under
-    ``detect_resource_drift``, source-level fetcher failure under
-    ``fetch_schemas``), so re-emitting would produce two events per one bug.
+    ``_detect_source_drift`` reports its own failures through the sink
+    (per-resource errors under ``detect_resource_drift``, a schema-fetch
+    failure under ``fetch_schemas``); the driver only maps a raise to
+    ``result.error``.
     """
 
     def _detect(ctx: DetectionContext) -> list[DriftFinding]:
         return _detect_source_drift(
             ctx.source,
-            # ``needs_fetcher=True`` means the driver resolved one — either the
-            # injected fetcher or the destination boundary's default.
-            fetcher=cast("SchemaFetcher", ctx.fetcher),
+            fetcher=ctx.fetcher,
             runner=ctx.runner,
             dataset=ctx.dataset,
             project_config=ctx.project_config,
@@ -331,7 +314,6 @@ def _reconcile_source_inner(
         sink=sink,
         runner=runner,
         fetcher=fetcher,
-        needs_fetcher=True,
         dataset=dataset,
         sources=sources,
         project_root=project_root,
@@ -413,7 +395,7 @@ def reconcile_all(
         resolved_sink.flush()
         # Return an empty list rather than raising — the caller (CLI /
         # orchestrator) gets a signal via the log message and the sink.
-        logger.exception("discover_sources failed inside reconcile_all — returning empty list")
+        logger.warning("discover_sources failed inside reconcile_all — returning empty list: %s", exc)
         return []
 
     results: list[ReconcileResult] = []
