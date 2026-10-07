@@ -33,6 +33,8 @@ dependencies = [
     "attrs",
     "pendulum",
     "sqlglot",
+    # Imported directly by dlt_ops.http; the floor matches dlt's own.
+    "requests>=2.26",
     # Hard dependency by design (`columns=` models are mandatory): the validator
     # framework, pydantic_fields helpers, and the init scaffold all import it
     # unconditionally.

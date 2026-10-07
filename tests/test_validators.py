@@ -57,6 +57,7 @@ EXPECTED_CORE_IDS = {
     "schema_contract_declared",
     "explicit_resource_name_multi_source",
     "cursor_not_load_timestamp",
+    "response_hook_raises_http_errors",
     "secret_backend_registered",
     "alert_sink_registered",
     "destination_capability",
@@ -2095,6 +2096,237 @@ class TestCursorNotLoadTimestampValidator:
         ctx = _make_ctx(tmp_path, config={"dlt_ops": {"load_timestamp_column": 42}})
         self._write(ctx, 'import dlt\n\ncur = dlt.sources.incremental("ingested_at")\n')
         assert validate_cursor_not_load_timestamp(ctx) == []
+
+
+# --- response_hook_raises_http_errors ---
+
+
+class TestResponseHookRaisesHttpErrorsValidator:
+    """Tests for validate_response_hooks_raise.
+
+    One test per shape the rule must reject. Each input fails only the condition
+    that its test names.
+    """
+
+    def _write(self, ctx: ValidationContext, body: str) -> None:
+        pipeline_dir = next(iter(ctx.sources.values())).path
+        (pipeline_dir / "resource.py").write_text(body, encoding="utf-8")
+
+    def test_raise_hook_first_passes(self, tmp_path):
+        from dlt_ops.discovery.validators.response_hooks import validate_response_hooks_raise
+
+        ctx = _make_ctx(tmp_path)
+        self._write(
+            ctx,
+            "from dlt_ops import raise_for_status\n\n"
+            'paginate(url, hooks={"response": [raise_for_status, progress("x")]})\n',
+        )
+        assert validate_response_hooks_raise(ctx) == []
+
+    def test_hook_list_built_in_variable_passes(self, tmp_path):
+        from dlt_ops.discovery.validators.response_hooks import validate_response_hooks_raise
+
+        ctx = _make_ctx(tmp_path)
+        self._write(
+            ctx,
+            "from dlt_ops import raise_for_status\n\n"
+            "response_hooks = [raise_for_status, _capture]\nhooks = {'response': response_hooks}\n"
+            "client.paginate(path='', hooks=hooks)\n",
+        )
+        assert validate_response_hooks_raise(ctx) == []
+
+    def test_no_hooks_kwarg_ignored(self, tmp_path):
+        """No custom hook means dlt installs its own raising handler — nothing to enforce."""
+        from dlt_ops.discovery.validators.response_hooks import validate_response_hooks_raise
+
+        ctx = _make_ctx(tmp_path)
+        self._write(ctx, "paginate(url, paginator=p)\n")
+        assert validate_response_hooks_raise(ctx) == []
+
+    def test_hooks_without_a_response_key_ignored(self, tmp_path):
+        """A request-only hook leaves dlt's response handler in place."""
+        from dlt_ops.discovery.validators.response_hooks import validate_response_hooks_raise
+
+        ctx = _make_ctx(tmp_path)
+        self._write(ctx, 'paginate(url, hooks={"request": [_trace]})\n')
+        assert validate_response_hooks_raise(ctx) == []
+
+    def test_raise_hook_missing_fails(self, tmp_path):
+        from dlt_ops.discovery.validators.response_hooks import validate_response_hooks_raise
+
+        ctx = _make_ctx(tmp_path)
+        self._write(ctx, 'paginate(url, hooks={"response": [progress("x")]})\n')
+        errors = validate_response_hooks_raise(ctx)
+        assert len(errors) == 1
+        assert errors[0].source_name == "my_pipe"
+        # `rel` renders the project-relative path with the OS separator.
+        assert errors[0].field == f"response_hooks.{Path('my_pipe/resource.py')}:1"
+        assert "raise_for_status" in errors[0].message
+
+    def test_raise_hook_not_first_fails(self, tmp_path):
+        """Ordering is load-bearing: a logging hook must not read an error body first."""
+        from dlt_ops.discovery.validators.response_hooks import validate_response_hooks_raise
+
+        ctx = _make_ctx(tmp_path)
+        self._write(
+            ctx,
+            "from dlt_ops import raise_for_status\n\n"
+            'paginate(url, hooks={"response": [progress("x"), raise_for_status]})\n',
+        )
+        errors = validate_response_hooks_raise(ctx)
+        assert len(errors) == 1
+        assert errors[0].field.endswith(":3")
+
+    def test_hook_list_built_in_variable_fails(self, tmp_path):
+        from dlt_ops.discovery.validators.response_hooks import validate_response_hooks_raise
+
+        ctx = _make_ctx(tmp_path)
+        self._write(
+            ctx,
+            "response_hooks = [_capture]\nhooks = {'response': response_hooks}\n"
+            "client.paginate(path='', hooks=hooks)\n",
+        )
+        errors = validate_response_hooks_raise(ctx)
+        assert len(errors) == 1
+        assert errors[0].field.endswith(":3")
+
+    def test_same_variable_name_in_two_functions_is_scoped(self, tmp_path):
+        """A `hooks` name bound in one function must not answer for a call in another."""
+        from dlt_ops.discovery.validators.response_hooks import validate_response_hooks_raise
+
+        ctx = _make_ctx(tmp_path)
+        self._write(
+            ctx,
+            "from dlt_ops import raise_for_status\n\n"
+            "def bad():\n"
+            "    hooks = [_capture]\n"
+            "    return paginate(url, hooks={'response': hooks})\n\n"
+            "def good():\n"
+            "    hooks = [raise_for_status, _capture]\n"
+            "    return paginate(url, hooks={'response': hooks})\n",
+        )
+        errors = validate_response_hooks_raise(ctx)
+        assert len(errors) == 1
+        assert errors[0].field.endswith(":5")  # the call inside bad(), not good()
+
+    def test_function_local_assign_does_not_leak_to_module_scope(self, tmp_path):
+        """A name bound only inside a function is invisible to a module-level call."""
+        from dlt_ops.discovery.validators.response_hooks import validate_response_hooks_raise
+
+        ctx = _make_ctx(tmp_path)
+        self._write(
+            ctx,
+            "from dlt_ops import raise_for_status\n\n"
+            "def unrelated():\n"
+            "    hooks = [raise_for_status]\n\n"
+            "paginate(url, hooks={'response': hooks})\n",
+        )
+        errors = validate_response_hooks_raise(ctx)
+        assert len(errors) == 1
+        assert errors[0].field.endswith(":6")
+
+    def test_rebound_name_is_judged_on_every_binding(self, tmp_path):
+        """Every binding of a re-bound `hooks` name must raise, in either order."""
+        from dlt_ops.discovery.validators.response_hooks import validate_response_hooks_raise
+
+        for first, second in (
+            ("[raise_for_status]", "[_capture]"),
+            ("[_capture]", "[raise_for_status]"),
+        ):
+            ctx = _make_ctx(tmp_path)
+            self._write(
+                ctx,
+                "from dlt_ops import raise_for_status\n\n"
+                f"hooks = {first}\nhooks = {second}\n"
+                "paginate(url, hooks={'response': hooks})\n",
+            )
+            errors = validate_response_hooks_raise(ctx)
+            assert len(errors) == 1, f"{first} then {second}"
+            assert errors[0].field.endswith(":5"), f"{first} then {second}"
+
+    def test_dynamically_built_hook_list_fails(self, tmp_path):
+        """Fail closed: a list the validator cannot read is one it cannot prove raises."""
+        from dlt_ops.discovery.validators.response_hooks import validate_response_hooks_raise
+
+        ctx = _make_ctx(tmp_path)
+        self._write(ctx, "paginate(url, hooks={'response': build_hooks('x')})\n")
+        errors = validate_response_hooks_raise(ctx)
+        assert len(errors) == 1
+        assert errors[0].field.endswith(":1")
+
+    def test_alias_and_qualified_references_are_not_matched(self, tmp_path):
+        """The match is on the bare name, so an alias or attribute form is reported.
+
+        Both call the right function, so this is a known false positive. The
+        rules reference names it as a limit; pinning it here keeps the limit and
+        the documentation from drifting apart.
+        """
+        from dlt_ops.discovery.validators.response_hooks import validate_response_hooks_raise
+
+        for form, body in (
+            ("alias", "from dlt_ops import raise_for_status as rfs\n\npaginate(url, hooks={'response': [rfs]})\n"),
+            ("qualified", "import dlt_ops\n\npaginate(url, hooks={'response': [dlt_ops.raise_for_status]})\n"),
+        ):
+            ctx = _make_ctx(tmp_path)
+            self._write(ctx, body)
+            assert len(validate_response_hooks_raise(ctx)) == 1, form
+
+    def test_unreadable_hooks_value_is_skipped_not_reported(self, tmp_path):
+        """Failing closed applies to a `response` list the rule found, not to the dict.
+
+        When the `hooks=` value itself is unreadable there is no `response` key
+        to judge, so the call site passes even though it may install a hook. This
+        is the rule's blind spot, documented in the rules reference.
+        """
+        from dlt_ops.discovery.validators.response_hooks import validate_response_hooks_raise
+
+        for form, body in (
+            ("helper call", "paginate(url, hooks=build_hooks())\n"),
+            ("name bound elsewhere", "paginate(url, hooks=HOOKS)\n"),
+        ):
+            ctx = _make_ctx(tmp_path)
+            self._write(ctx, body)
+            assert validate_response_hooks_raise(ctx) == [], form
+
+    def test_rule_is_reached_through_the_registry(self, make_project):
+        """End-to-end through validate_sources: on by default, silent when disabled.
+
+        Calling the validator directly proves it works; this proves the project
+        actually runs it, and that the rule ID turns it off.
+        """
+        source = dedent("""
+            import dlt
+            import pydantic
+
+            class Row(pydantic.BaseModel):
+                model_config = pydantic.ConfigDict(extra="forbid")
+                id: int
+
+            def _progress(response, *args, **kwargs):
+                return None
+
+            @dlt.resource(name="dim_rows", columns=Row)
+            def dim_rows():
+                yield from _client().paginate("rows", hooks={"response": [_progress]})
+
+            @dlt.source(name="dim_api")
+            def dim_api_source():
+                return dim_rows
+        """)
+        base = (
+            '[dlt_ops]\ndefault_destination = "duckdb"\ndefault_dataset = "raw"\n\n'
+            '[sources.dim_api.dlt_ops]\nschedule = "@daily"\n'
+        )
+        files = {"dim/source/dim_api.py": source}
+
+        on = validate_sources(make_project(config=base, files=files, name="on"))
+        assert [e.field for e in on if e.field.startswith("response_hooks.")] == [
+            f"response_hooks.{Path('dim/source/dim_api.py')}:14"
+        ]
+
+        off_config = base + "\n[dlt_ops.rules]\nresponse_hook_raises_http_errors = false\n"
+        off = validate_sources(make_project(config=off_config, files=files, name="off"))
+        assert [e for e in off if e.field.startswith("response_hooks.")] == []
 
 
 class TestLoadTimestampColumnReader:

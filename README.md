@@ -41,7 +41,7 @@ dlt is an excellent ingestion primitive, and deliberately unopinionated — it m
 ## What you get
 
 - **Pre-load assertions** — per-resource data-quality gates (`min_rows_per_load`, `max_rows_per_load`, `required_columns`, `unique_columns`, custom predicates) declared in TOML and enforced between extract and load: fail the run, quarantine rows to a `_dlt_rejected` table, or warn — bad data never loads by default.
-- **`pipeline validate`** — a rule framework (21 core rules, plus plugin-owned ones) that statically checks layout, naming, config, schedules, schema contracts, column typing, assertion config, destination capability, and import safety before anything runs.
+- **`pipeline validate`** — a rule framework (22 core rules, plus plugin-owned ones) that statically checks layout, naming, config, schedules, schema contracts, column typing, assertion config, destination capability, and import safety before anything runs.
 - **Filesystem discovery** — a mandatory project layout; sources are found by scanning, not by registration code. Phase 1 is a pure AST scan (never imports your code); Phase 2 imports inside a sandbox that fails on import-time network I/O or disk writes.
 - **Schema-drift reconciler** — `pipeline reconcile` diffs the live destination schema against your declared Pydantic models (additive drift), optionally detects model columns whose data went dark (`--include-removal`), and routes findings to pluggable alert sinks.
 - **Checkpoints** — `@with_checkpoints` persists pagination progress to the destination mid-run; a failed run resumes from the last checkpoint instead of the window start.

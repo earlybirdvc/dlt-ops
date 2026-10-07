@@ -20,7 +20,7 @@ Inspect the resolution for your project — the command prints every known rule 
 
 ```console
 $ dlt-ops pipeline validate --show-resolved-rules
-Resolved rules (23):
+Resolved rules (24):
   bigquery_partitioning                on   bigquery
   bigquery_partition_hints             on   bigquery
   import_safety                        on   core
@@ -36,6 +36,7 @@ Resolved rules (23):
   schema_contract_declared             on   core
   explicit_resource_name_multi_source  on   core
   cursor_not_load_timestamp            on   core
+  response_hook_raises_http_errors     on   core
   incremental_cursor_required          off  core
   secret_backend_registered            on   core
   alert_sink_registered                on   core
@@ -46,7 +47,7 @@ Resolved rules (23):
   assertion_predicate_resolvable       on   core
 ```
 
-A bare environment resolves **23 rules**: 21 from `core` and 2 from `bigquery`. The `airflow` provider adds one more (`airflow_var_required`) only when the `[airflow]` extra is installed — it loads either way, so `plugins doctor` stays green on a bare install, but contributes no rules until `airflow` is importable, and so does not appear above.
+A bare environment resolves **24 rules**: 22 from `core` and 2 from `bigquery`. The `airflow` provider adds one more (`airflow_var_required`) only when the `[airflow]` extra is installed — it loads either way, so `plugins doctor` stays green on a bare install, but contributes no rules until `airflow` is importable, and so does not appear above.
 
 Every core rule but one defaults to on. `incremental_cursor_required` ships **off**, and this listing is where you discover it — the section below explains why it is a project's decision rather than a default.
 
@@ -81,6 +82,7 @@ Findings are errors unless tagged **warning** below. Every run renders both kind
 | [`schema_contract_declared`](#schema_contract_declared) | core | Tier 1 | A declared `schema_contract` is exactly the canonical freeze literal (or the opted-in evolve literal). |
 | [`explicit_resource_name_multi_source`](#explicit_resource_name_multi_source) | core | Tier 1 | In multi-source directories, every `@dlt.resource` passes an explicit `name=`. |
 | [`cursor_not_load_timestamp`](#cursor_not_load_timestamp) | core | Tier 1 | No incremental cursor uses the configured `load_timestamp_column`. |
+| [`response_hook_raises_http_errors`](#response_hook_raises_http_errors) | core | Tier 1 | A custom `response` hook list starts with `raise_for_status`, so an HTTP error raises instead of loading zero rows. |
 | [`incremental_cursor_required`](#incremental_cursor_required) | core | Tier 1 · **off by default** | Every resource of a recurring-schedule source declares an incremental cursor. |
 | [`secret_backend_registered`](#secret_backend_registered) | core | Tier 1 + Tier-2 twin | Every engaged secret backend resolves to a registered, healthy `secret_backend` plugin. |
 | [`alert_sink_registered`](#alert_sink_registered) | core | Tier 1 + Tier-2 twin | Every configured `alert_sinks` name is a registered, constructible `alert_sink` plugin. |
@@ -203,6 +205,36 @@ The two routes are not interchangeable, and the difference shows up on the first
 *Tier 1 (`validate`).*
 
 **No `dlt.sources.incremental(...)` uses the configured `[dlt_ops] load_timestamp_column` as its cursor.** That column advances on every run, so cursoring on it silently skips in-window source updates — use the provider's business timestamp instead. Inert when `load_timestamp_column` is unset. It catches a *wrong* cursor; a *missing* one is the next rule's question.
+
+### `response_hook_raises_http_errors`
+
+*Tier 1 (`validate`).*
+
+**A custom `response` hook list must be a list literal whose first element is the bare name `raise_for_status`.** dlt's `RESTClient` installs its own error-raising response handler only when the caller passes no `response` hook, and its session runs with `raise_for_status=False`. Passing any `response` hook replaces that handler, so nothing turns a 4xx/5xx into an exception. When the error body is valid JSON and the resource's `data_selector` finds no records in it, the resource yields nothing, dlt writes an empty load package, and the run reports success.
+
+Ordering matters: raising first stops a logging or progress hook from reporting a "0 records" page for what is actually an error response.
+
+```python
+from dlt_ops import raise_for_status
+
+client.paginate(path, hooks={"response": [raise_for_status, my_progress_hook]})
+```
+
+The rule reads the hook list from the source text. It follows an inline literal (`hooks={"response": [...]}`) and one hop of variable indirection (`hooks={"response": my_hooks}` or `hooks=my_hooks_dict`), which is the shape used when the list is built conditionally. Name bindings are tracked per scope, so two resources in one module that each build a local `hooks` list are checked separately. A name bound more than once must raise on every binding, because the rule cannot know which binding is in effect at the call.
+
+Once the rule recognises a `response` key, it fails closed: a hook list it cannot read — built by a helper call, or bound outside the visible scopes — is reported, because it cannot be proven to raise. The fix is to make the list legible, not to exempt the shape:
+
+```python
+hooks={"response": [raise_for_status, *build_hooks()]}
+```
+
+Three limits are worth knowing:
+
+- **The match is on the bare name, and only on the bare name.** Any function called `raise_for_status` satisfies the rule, including dlt's own thinner one. An alias (`raise_for_status as rfs`) or a qualified reference (`dlt_ops.raise_for_status`) does **not** satisfy it, and is reported even though it calls the right function. Import the name unqualified.
+- **An unreadable `hooks=` value is skipped, not reported.** The rule can only fail closed on a `response` list it has found. `hooks=build_hooks()` and `hooks=HOOKS`, where the dict itself is not a readable literal or a one-hop local binding, pass without a finding even if they do install a response hook. Pass the dict literally to keep the call site checkable.
+- **Findings are attributed to the pipeline name.** A per-source `rule_exemptions` entry therefore matches only when the source name equals its pipeline directory name.
+
+An endpoint where a status legitimately means "nothing here" — a 404 on a deleted entity — should issue a direct request and handle that status explicitly, instead of using this hook.
 
 ### `incremental_cursor_required`
 

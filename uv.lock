@@ -1232,6 +1232,7 @@ dependencies = [
     { name = "dlt" },
     { name = "pendulum" },
     { name = "pydantic" },
+    { name = "requests" },
     { name = "sqlglot" },
 ]
 
@@ -1304,6 +1305,7 @@ requires-dist = [
     { name = "dlt", extras = ["snowflake"], marker = "extra == 'snowflake'" },
     { name = "pendulum" },
     { name = "pydantic" },
+    { name = "requests", specifier = ">=2.26" },
     { name = "sentry-sdk", marker = "extra == 'sentry'", specifier = ">=2" },
     { name = "sqlglot" },
 ]

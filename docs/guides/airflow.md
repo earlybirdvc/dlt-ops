@@ -140,7 +140,7 @@ dlt-ops pipeline validate --show-resolved-rules
 ```
 
 ```text
-Resolved rules (23):
+Resolved rules (24):
   bigquery_partitioning                on   bigquery
   bigquery_partition_hints             on   bigquery
   import_safety                        on   core

@@ -26,6 +26,7 @@ from dlt_ops.discovery.validators.platform_rules import (
     validate_schema_contract,
 )
 from dlt_ops.discovery.validators.resources import validate_no_resource_overlap
+from dlt_ops.discovery.validators.response_hooks import validate_response_hooks_raise
 from dlt_ops.discovery.validators.schema import (
     validate_json_column_hints,
     validate_pydantic_model_forbids_extra,
@@ -73,6 +74,11 @@ CORE_RULES: tuple[RuleSpec, ...] = (
         plugin="core",
     ),
     RuleSpec(rule_id="cursor_not_load_timestamp", validator=validate_cursor_not_load_timestamp, plugin="core"),
+    RuleSpec(
+        rule_id="response_hook_raises_http_errors",
+        validator=validate_response_hooks_raise,
+        plugin="core",
+    ),
     # The only opt-in core rule. Its sibling above catches a WRONG cursor; this
     # one catches a MISSING one, which is a policy rather than a defect — a full
     # refresh is legitimate, and nothing the package can see separates "chose to"
@@ -127,6 +133,7 @@ __all__ = [
     "validate_pydantic_model_forbids_extra",
     "validate_resource_columns_hint",
     "validate_resource_name_explicit_in_multi_source_dir",
+    "validate_response_hooks_raise",
     "validate_schema_contract",
     "validate_schedules",
     "validate_secret_backends",
