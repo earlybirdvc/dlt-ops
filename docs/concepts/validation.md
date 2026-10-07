@@ -44,18 +44,18 @@ The run exits 1 before extract. A config entry that silently did nothing would b
 
 **Rules are not hard-coded into `validate`.** They arrive as specs from **providers** registered in the `dlt_ops.validators` entry-point group; a provider is a zero-argument callable returning rule specs, and installing a distribution that registers one auto-activates its rules. The package's own rules ship through the same mechanism — three first-party providers:
 
-- **`core`** — 21 rules, destination- and orchestrator-agnostic; all on by default except `incremental_cursor_required`.
+- **`core`** — 22 rules, destination- and orchestrator-agnostic; all on by default except `incremental_cursor_required`.
 - **`bigquery`** — 2 rules that ship in the main distribution: AST and column-hint checks with no BigQuery SDK involved, so they resolve without the `[bigquery]` extra installed, and no-op for projects that never touch BigQuery.
 - **`airflow`** — contributes its rule only when Airflow is importable, i.e. with the `[airflow]` extra.
 
-Inspect exactly what resolved for your environment — on a bare install, 23 rules:
+Inspect exactly what resolved for your environment — on a bare install, 24 rules:
 
 ```bash
 dlt-ops pipeline validate --show-resolved-rules
 ```
 
 ```text
-Resolved rules (23):
+Resolved rules (24):
   bigquery_partitioning                on   bigquery
   bigquery_partition_hints             on   bigquery
   import_safety                        on   core
@@ -71,6 +71,7 @@ Resolved rules (23):
   schema_contract_declared             on   core
   explicit_resource_name_multi_source  on   core
   cursor_not_load_timestamp            on   core
+  response_hook_raises_http_errors     on   core
   incremental_cursor_required          off  core
   secret_backend_registered            on   core
   alert_sink_registered                on   core

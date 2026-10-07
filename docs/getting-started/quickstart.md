@@ -103,7 +103,7 @@ dlt-ops pipeline validate --show-resolved-rules
 ```
 
 ```text
-Resolved rules (23):
+Resolved rules (24):
   bigquery_partitioning                on   bigquery
   bigquery_partition_hints             on   bigquery
   import_safety                        on   core
@@ -115,7 +115,7 @@ Resolved rules (23):
   assertion_predicate_resolvable       on   core
 ```
 
-The `core` provider owns 21 rules; the two `bigquery` rules are plugin-owned and auto-active because the BigQuery plugin loads (its rules are AST and column-hint checks with no BigQuery SDK involved, so they resolve even without the `[bigquery]` extra installed). All but one core rule are on by default — `incremental_cursor_required` ships off, and `--show-resolved-rules` is where you discover it. Every rule can be switched per project in `[dlt_ops.rules]` or exempted per source with a mandatory written reason — the [rules reference](../configuration/rules.md) covers each one.
+The `core` provider owns 22 rules; the two `bigquery` rules are plugin-owned and auto-active because the BigQuery plugin loads (its rules are AST and column-hint checks with no BigQuery SDK involved, so they resolve even without the `[bigquery]` extra installed). All but one core rule are on by default — `incremental_cursor_required` ships off, and `--show-resolved-rules` is where you discover it. Every rule can be switched per project in `[dlt_ops.rules]` or exempted per source with a mandatory written reason — the [rules reference](../configuration/rules.md) covers each one.
 
 ## Run
 

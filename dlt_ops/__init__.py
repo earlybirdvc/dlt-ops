@@ -32,6 +32,7 @@ from dlt_ops.discovery import (
     discover_sources,
     validate_sources,
 )
+from dlt_ops.http import raise_for_status
 from dlt_ops.plugins import register
 from dlt_ops.pydantic_fields import drop_unknown_nulls, extract_model_column_names
 from dlt_ops.secrets import SecretBackend
@@ -68,6 +69,7 @@ __all__ = [
     "drop_unknown_nulls",
     "extract_model_column_names",
     "list_checkpoints",
+    "raise_for_status",
     "reconcile_all",
     "reconcile_source",
     "register",

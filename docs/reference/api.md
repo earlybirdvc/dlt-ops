@@ -89,6 +89,15 @@ Persist pagination progress to the destination and resume mid-run; see [checkpoi
       docstring_options:
         warn_missing_types: false
 
+## HTTP response hooks
+
+Make an HTTP error raise instead of loading an empty page. The `response_hook_raises_http_errors` rule checks the hook ordering statically; see the [rules reference](../configuration/rules.md#response_hook_raises_http_errors).
+
+::: dlt_ops.raise_for_status
+    options:
+      show_root_heading: true
+      heading_level: 3
+
 ## Destination adapters
 
 The contract a destination implements to reach full tier; see [destinations and capability tiers](../concepts/destinations-and-tiers.md) and the [adapter guide](../guides/write-a-destination-adapter.md).

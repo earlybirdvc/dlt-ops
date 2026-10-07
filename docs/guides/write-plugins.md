@@ -297,7 +297,7 @@ dlt-ops pipeline validate --show-resolved-rules
 ```
 
 ```text
-Resolved rules (24):
+Resolved rules (25):
   acme_no_shouting_resources           on   acme
   bigquery_partitioning                on   bigquery
   bigquery_partition_hints             on   bigquery

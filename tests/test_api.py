@@ -32,6 +32,7 @@ PUBLIC_API = [
     "drop_unknown_nulls",
     "extract_model_column_names",
     "list_checkpoints",
+    "raise_for_status",
     "reconcile_all",
     "reconcile_source",
     "register",
