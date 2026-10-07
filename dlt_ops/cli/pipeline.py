@@ -69,7 +69,7 @@ def list_sources(ctx: click.Context, filter_schedule: str | None, output_json: b
                 "pipeline": src.pipeline_name,
                 "function": src.function_name,
                 "config_section": src.config_section,
-                "schedule": src.config.schedule.value if src.config else None,
+                "schedule": src.config.schedule if src.config else None,
                 "airflow_var": src.config.airflow_var if src.config else None,
                 "resources": list(src.resources),
             }
@@ -85,7 +85,7 @@ def list_sources(ctx: click.Context, filter_schedule: str | None, output_json: b
     # Filter by schedule if specified
     if filter_schedule:
         try:
-            target_schedule = Schedule.from_string(filter_schedule)
+            target_schedule = Schedule.from_string(filter_schedule).value
         except ValueError as e:
             click.echo(click.style(f"Error: {e}", fg="red"))
             sys.exit(1)
@@ -102,7 +102,7 @@ def list_sources(ctx: click.Context, filter_schedule: str | None, output_json: b
 
     for name in sorted(sources.keys()):
         src = sources[name]
-        schedule = src.config.schedule.value if src.config else click.style("-", fg="yellow")
+        schedule = src.config.schedule if src.config else click.style("-", fg="yellow")
         resource_count = len(src.resources)
 
         if src.config:
@@ -168,7 +168,7 @@ def resources(ctx: click.Context, source_name: str | None, output_json: bool) ->
 
         for i, name in enumerate(source_names, 1):
             src = sources[name]
-            schedule = src.config.schedule.value if src.config else "-"
+            schedule = src.config.schedule if src.config else "-"
             click.echo(f"  {click.style(str(i), fg='cyan')}. {name} ({schedule}, {len(src.resources)} resources)")
 
         click.echo()
@@ -197,7 +197,7 @@ def resources(ctx: click.Context, source_name: str | None, output_json: bool) ->
     click.echo(click.style("Config: ", dim=True) + f"[sources.{src.config_section}]")
 
     if src.config:
-        click.echo(click.style("Schedule: ", dim=True) + click.style(src.config.schedule.value, fg="green"))
+        click.echo(click.style("Schedule: ", dim=True) + click.style(src.config.schedule, fg="green"))
         if src.config.airflow_var:
             click.echo(click.style("Airflow Variable: ", dim=True) + src.config.airflow_var)
     click.echo()
@@ -265,7 +265,7 @@ def run(
 
         for i, name in enumerate(source_names, 1):
             src = sources[name]
-            schedule = src.config.schedule.value if src.config else "-"
+            schedule = src.config.schedule if src.config else "-"
             click.echo(f"  {click.style(str(i), fg='cyan')}. {name} ({schedule}, {len(src.resources)} resources)")
 
         click.echo()

@@ -67,11 +67,11 @@ if __name__ == "__main__":
     deployments = [
         ingest.to_deployment(
             name=f"ingest-{name}",
-            cron=TAG_TO_CRON[info.config.schedule.value],
+            cron=TAG_TO_CRON[info.config.schedule],
             parameters={"source": name},
         )
         for name, info in discover_sources(PROJECT_ROOT).items()
-        if info.config and info.config.schedule.value != "@manual"
+        if info.config and info.config.schedule != "@manual"
     ]
     serve(*deployments)
 ```

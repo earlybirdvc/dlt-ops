@@ -34,7 +34,7 @@ from dlt.common.configuration.specs.pluggable_run_context import PluggableRunCon
 
 from dlt_ops.airflow import AirflowVariableBackend, airflow_rules, pin_dlt_project_dir  # noqa: E402
 from dlt_ops.cli.plugins import plugins as plugins_cli  # noqa: E402
-from dlt_ops.discovery import Schedule, validate_sources  # noqa: E402
+from dlt_ops.discovery import validate_sources  # noqa: E402
 from dlt_ops.discovery.phase2 import SOURCE_MODULE_NAMESPACE  # noqa: E402
 from dlt_ops.plugins import registry as registry_mod  # noqa: E402
 from dlt_ops.secrets import SecretBackend, SecretNotFoundError, SecretRequest, setup_secrets  # noqa: E402
@@ -318,24 +318,24 @@ class TestScheduleCronMap:
         label and Airflow would reject the DAG at parse time."""
         from dlt_ops.airflow.factory import SCHEDULE_CRON_MAP
 
-        assert SCHEDULE_CRON_MAP[Schedule.TWO_HOURLY.value] == "0 */2 * * *"
+        assert SCHEDULE_CRON_MAP["@2hourly"] == "0 */2 * * *"
 
     def test_weekly_pinned_to_monday(self):
         """Monday 00:00 UTC closes the ISO week — the Sunday-00:00 preset
         would leave the week's own Sunday uncaptured. Fixed by design."""
         from dlt_ops.airflow.factory import SCHEDULE_CRON_MAP
 
-        assert SCHEDULE_CRON_MAP[Schedule.WEEKLY.value] == "0 0 * * 1"
+        assert SCHEDULE_CRON_MAP["@weekly"] == "0 0 * * 1"
 
     def test_schedule_to_airflow_mapping(self):
         from dlt_ops.airflow.factory import schedule_to_airflow
 
-        assert schedule_to_airflow(Schedule.MANUAL) is None
-        assert schedule_to_airflow(Schedule.DAILY) == "@daily"
-        assert schedule_to_airflow(Schedule.HOURLY) == "@hourly"
-        assert schedule_to_airflow(Schedule.MONTHLY) == "@monthly"
-        assert schedule_to_airflow(Schedule.TWO_HOURLY) == "0 */2 * * *"
-        assert schedule_to_airflow(Schedule.WEEKLY) == "0 0 * * 1"
+        assert schedule_to_airflow("@manual") is None
+        assert schedule_to_airflow("@daily") == "@daily"
+        assert schedule_to_airflow("@hourly") == "@hourly"
+        assert schedule_to_airflow("@monthly") == "@monthly"
+        assert schedule_to_airflow("@2hourly") == "0 */2 * * *"
+        assert schedule_to_airflow("@weekly") == "0 0 * * 1"
 
 
 @needs_airflow

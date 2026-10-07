@@ -213,7 +213,7 @@ def _parse_source_config(config: dict[str, Any], config_section: str) -> SourceC
         return None
 
     try:
-        schedule = Schedule.from_string(schedule_str)
+        schedule = Schedule.from_string(schedule_str).value
     except ValueError as e:
         logger.warning(f"Invalid schedule in [sources.{config_section}.dlt_ops]: {schedule_str} - {e}")
         return None

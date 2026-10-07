@@ -24,7 +24,7 @@ def resolve_load_timestamp_column(raw: Any) -> str | None:
 
 
 class Schedule(str, Enum):
-    """Valid schedule tags for dlt pipelines."""
+    """Built-in schedule names. A project adds its own in ``[dlt_ops.schedules]``."""
 
     HOURLY = "@hourly"
     TWO_HOURLY = "@2hourly"
@@ -48,7 +48,8 @@ class SourceConfig:
     """Config from config.toml for a source.
 
     All custom keys are under [sources.X.dlt_ops]:
-    - schedule: Schedule enum value
+    - schedule: schedule name as a plain string, a built-in Schedule value
+      or a name declared in [dlt_ops.schedules]
     - destination: per-source destination override; falls back to
       [dlt_ops].default_destination (see dlt_ops.config)
     - dataset: per-source dataset override; falls back to
@@ -67,7 +68,7 @@ class SourceConfig:
       `loaded_at` is always ignored — no need to list it.
     """
 
-    schedule: Schedule
+    schedule: str
     destination: str | None = None  # Destination override (project default if None)
     dataset: str | None = None  # Dataset override (project default if None)
     airflow_var: str | None = None  # Variable name for secrets (display only)

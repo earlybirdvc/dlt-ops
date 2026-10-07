@@ -99,7 +99,7 @@ from pathlib import Path
 from dlt_ops.orchestration import scheduled_sources
 
 for schedule, sources in scheduled_sources(Path(".")).items():
-    print(schedule.value, [s.name for s in sources])
+    print(schedule, [s.name for s in sources])
 ```
 
 ```text

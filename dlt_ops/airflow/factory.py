@@ -1,4 +1,4 @@
-"""Generic DAG factory: one DAG per ``Schedule`` group, Phase-1 discovery only at parse time.
+"""Generic DAG factory: one DAG per schedule group, Phase-1 discovery only at parse time.
 
 Parse-time contract: :func:`build_schedule_dags` calls only Phase-1 discovery
 (pure AST) — no project source module is imported while the Airflow scheduler
@@ -76,7 +76,7 @@ __all__ = ["SCHEDULE_CRON_MAP", "build_schedule_dags", "schedule_to_airflow"]
 
 logger = logging.getLogger(__name__)
 
-# Cron materialization of Schedule values is orchestrator policy, fixed by
+# Cron materialization of built-in schedule names is orchestrator policy, fixed by
 # design (opinionated, no config knob):
 # - "@2hourly" is not an Airflow preset; it materializes as `0 */2 * * *`
 #   (every even hour at :00).
@@ -90,11 +90,11 @@ SCHEDULE_CRON_MAP: dict[str, str] = {
 }
 
 
-def schedule_to_airflow(schedule: Schedule) -> str | None:
-    """Airflow ``schedule`` value for a Schedule: cron overrides first, presets pass through."""
-    if schedule is Schedule.MANUAL:
+def schedule_to_airflow(schedule: str) -> str | None:
+    """Airflow ``schedule`` value for a schedule name: cron overrides first, presets pass through."""
+    if schedule == Schedule.MANUAL:
         return None
-    return SCHEDULE_CRON_MAP.get(schedule.value, schedule.value)
+    return SCHEDULE_CRON_MAP.get(schedule, schedule)
 
 
 def _execute_unit(
@@ -181,10 +181,10 @@ def build_schedule_dags(
     extra_dag_kwargs = dict(dag_kwargs) if dag_kwargs else {}
 
     dags: dict[str, DAG] = {}
-    for schedule in sorted(groups, key=lambda s: s.value):
+    for schedule in sorted(groups):
         sources = sorted(groups[schedule], key=lambda s: s.name)
         known = tuple(source.name for source in sources)
-        dag_id = f"{dag_prefix}_{schedule.value.removeprefix('@')}"
+        dag_id = f"{dag_prefix}_{schedule.removeprefix('@')}"
         with DAG(
             dag_id=dag_id,
             schedule=schedule_to_airflow(schedule),
@@ -208,7 +208,7 @@ def build_schedule_dags(
                                 "source_name": source.name,
                                 "resource": resource,
                                 "known_sources": known,
-                                "has_native_window": schedule is not Schedule.MANUAL,
+                                "has_native_window": schedule != Schedule.MANUAL,
                             },
                         )
                 task_groups.append(task_group)

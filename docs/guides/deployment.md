@@ -25,7 +25,7 @@ from pathlib import Path
 from dlt_ops import discover_sources
 
 for name, info in discover_sources(Path(".")).items():
-    print(name, info.config.schedule.value)
+    print(name, info.config.schedule)
 ```
 
 ```text

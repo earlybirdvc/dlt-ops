@@ -31,7 +31,7 @@ from pathlib import Path
 from dlt_ops import discover_sources
 
 for name, info in discover_sources(Path(".")).items():
-    print(name, info.config.schedule.value)
+    print(name, info.config.schedule)
 ```
 
 ```text
@@ -85,9 +85,9 @@ def source_asset(name: str, cron: str) -> dg.AssetsDefinition:
 
 
 assets = [
-    source_asset(name, TAG_TO_CRON[info.config.schedule.value])
+    source_asset(name, TAG_TO_CRON[info.config.schedule])
     for name, info in discover_sources(PROJECT_ROOT).items()
-    if info.config and info.config.schedule.value != "@manual"
+    if info.config and info.config.schedule != "@manual"
 ]
 ```
 

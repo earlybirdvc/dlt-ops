@@ -80,20 +80,20 @@ class TestSchedule:
 
 class TestSourceConfig:
     def test_default_values(self):
-        config = SourceConfig(schedule=Schedule.DAILY)
-        assert config.schedule == Schedule.DAILY
+        config = SourceConfig(schedule="@daily")
+        assert config.schedule == "@daily"
         assert config.destination is None
         assert config.dataset is None
         assert config.airflow_var is None
 
     def test_custom_values(self):
         config = SourceConfig(
-            schedule=Schedule.HOURLY,
+            schedule="@hourly",
             destination="duckdb",
             dataset="legacy_export",
             airflow_var="my-api-key",
         )
-        assert config.schedule == Schedule.HOURLY
+        assert config.schedule == "@hourly"
         assert config.destination == "duckdb"
         assert config.dataset == "legacy_export"
         assert config.airflow_var == "my-api-key"
@@ -104,32 +104,29 @@ class TestSourceConfig:
         `airflow_var_key` used to sit here with an Airflow default that nothing
         read; the Airflow backend has always taken it off the raw ext table.
         """
-        assert not hasattr(SourceConfig(schedule=Schedule.DAILY), "airflow_var_key")
+        assert not hasattr(SourceConfig(schedule="@daily"), "airflow_var_key")
 
     def test_immutable(self):
-        config = SourceConfig(schedule=Schedule.DAILY)
+        config = SourceConfig(schedule="@daily")
         with pytest.raises(AttributeError):
-            config.schedule = Schedule.HOURLY
+            config.schedule = "@hourly"
 
     def test_is_schema_contract_evolve_true_for_non_empty_reason(self):
         config = SourceConfig(
-            schedule=Schedule.HOURLY,
+            schedule="@hourly",
             schema_contract_evolve_reason="Provider ships nullable additive fields.",
         )
         assert config.is_schema_contract_evolve is True
 
     def test_is_schema_contract_evolve_false_when_absent(self):
-        assert SourceConfig(schedule=Schedule.HOURLY).is_schema_contract_evolve is False
+        assert SourceConfig(schedule="@hourly").is_schema_contract_evolve is False
 
     def test_is_schema_contract_evolve_false_for_empty_string(self):
-        assert (
-            SourceConfig(schedule=Schedule.HOURLY, schema_contract_evolve_reason="").is_schema_contract_evolve is False
-        )
+        assert SourceConfig(schedule="@hourly", schema_contract_evolve_reason="").is_schema_contract_evolve is False
 
     def test_is_schema_contract_evolve_false_for_whitespace_only(self):
         assert (
-            SourceConfig(schedule=Schedule.HOURLY, schema_contract_evolve_reason="   \n\t").is_schema_contract_evolve
-            is False
+            SourceConfig(schedule="@hourly", schema_contract_evolve_reason="   \n\t").is_schema_contract_evolve is False
         )
 
     def test_is_schema_contract_evolve_does_not_raise_on_non_string(self):
@@ -140,7 +137,7 @@ class TestSourceConfig:
         """
         for bogus in (42, True, ["reason"], {"why": "..."}, 3.14):
             config = SourceConfig(
-                schedule=Schedule.HOURLY,
+                schedule="@hourly",
                 schema_contract_evolve_reason=bogus,  # type: ignore[arg-type]
             )
             assert config.is_schema_contract_evolve is False
@@ -189,7 +186,7 @@ class TestSourceInfo:
         def dummy_source():
             pass
 
-        config = SourceConfig(schedule=Schedule.DAILY)
+        config = SourceConfig(schedule="@daily")
         info = SourceInfo(
             name="test",
             pipeline_name="test_pipeline",
@@ -201,7 +198,7 @@ class TestSourceInfo:
             config=config,
         )
         assert info.config == config
-        assert info.config.schedule == Schedule.DAILY
+        assert info.config.schedule == "@daily"
         assert info.config_section == "test"
 
 
@@ -240,8 +237,8 @@ class TestDiscoverSourcesProjectTree:
 
         assert sources["events_api"].pipeline_name == "events"
         assert sources["events_api"].resources == ("events",)
-        assert sources["events_api"].config.schedule == Schedule.DAILY
-        assert sources["orders_api"].config.schedule == Schedule.WEEKLY
+        assert sources["events_api"].config.schedule == "@daily"
+        assert sources["orders_api"].config.schedule == "@weekly"
         assert sources["orders_api"].config.dataset == "orders_raw"
 
     def test_get_sources_by_schedule(self, project_root):
@@ -250,14 +247,14 @@ class TestDiscoverSourcesProjectTree:
 
         total = sum(len(lst) for lst in by_schedule.values())
         assert total == len(sources)
-        assert [s.name for s in by_schedule[Schedule.DAILY]] == ["events_api"]
-        assert [s.name for s in by_schedule[Schedule.WEEKLY]] == ["orders_api"]
+        assert [s.name for s in by_schedule["@daily"]] == ["events_api"]
+        assert [s.name for s in by_schedule["@weekly"]] == ["orders_api"]
 
     def test_source_without_config_section_has_no_config(self, make_project):
         root = make_project(files={"events/source/events_api.py": EVENTS_SOURCE})
         sources = discover_sources(root)
         assert sources["events_api"].config is None
-        assert get_sources_by_schedule(sources)[Schedule.MANUAL][0].name == "events_api"
+        assert get_sources_by_schedule(sources)["@manual"][0].name == "events_api"
 
     def test_broken_config_toml_is_hard_error(self, make_project):
         root = make_project(
@@ -303,7 +300,7 @@ class TestPhase1Discover:
         assert set(sources) == {"exploding_api"}
         info = sources["exploding_api"]
         assert info.pipeline_name == "exploding"
-        assert info.config is not None and info.config.schedule == Schedule.DAILY
+        assert info.config is not None and info.config.schedule == "@daily"
         assert info.resources == ("rows",)
         assert info.module_stem == "exploding_api"
         assert info.module_path == root / "exploding" / "source" / "exploding_api.py"
@@ -677,7 +674,8 @@ class TestParseSourceConfig:
         }
         result = _parse_source_config(config, "my_source")
         assert result is not None
-        assert result.schedule == Schedule.DAILY
+        assert result.schedule == "@daily"
+        assert type(result.schedule) is str
         assert result.airflow_var == "my-api-key"
         assert result.dataset is None
 
@@ -696,7 +694,7 @@ class TestParseSourceConfig:
         }
         result = _parse_source_config(config, "db_export")
         assert result is not None
-        assert result.schedule == Schedule.HOURLY
+        assert result.schedule == "@hourly"
         assert result.dataset == "legacy_export"
         assert result.airflow_var == "db-export-credentials"
         # `airflow_var_key` is present in the ext table above and deliberately

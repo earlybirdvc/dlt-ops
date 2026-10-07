@@ -36,12 +36,6 @@ logger = logging.getLogger(__name__)
 INCREMENTAL_CURSOR_RULE_ID = "incremental_cursor_required"
 """Rule ID of the opt-in missing-cursor rule; the exemption message quotes it."""
 
-# Schedules that make a full refresh repeat on a cadence. @manual is excluded:
-# a source only run on demand re-reads everything when someone asks it to,
-# which is the case the rule has no opinion about.
-_RECURRING_SCHEDULES = frozenset(Schedule) - {Schedule.MANUAL}
-
-
 # The remedy for a declared-but-non-canonical contract, worded once because
 # two call sites emit it. "Omit it" is the advice in both cases, but the reason
 # splits on the columns= hint: dlt derives a contract from a Pydantic model at
@@ -351,8 +345,9 @@ def validate_incremental_cursor_required(ctx: ValidationContext) -> list[Validat
     would buy visibility and no gate. Opting in is the decision; enforcing it
     is the point.
 
-    Scoped to sources whose config declares a recurring schedule, because the
-    harm is a full refresh repeating on a cadence; ``@manual`` sources and
+    Scoped to sources whose config declares a recurring schedule (any schedule
+    but ``@manual``, declared ones included), because the harm is a full
+    refresh repeating on a cadence; ``@manual`` sources and
     sources with no parsed config are out of scope. Reads the live resource
     rather than the AST — ``apply_hints(incremental=...)`` and factory-built
     cursors are invisible to a source-text scan, and a false "no cursor" would
@@ -366,7 +361,7 @@ def validate_incremental_cursor_required(ctx: ValidationContext) -> list[Validat
     for name in sorted(ctx.sources):
         source = ctx.sources[name]
         config = source.config
-        if config is None or config.schedule not in _RECURRING_SCHEDULES:
+        if config is None or config.schedule == Schedule.MANUAL:
             continue
         try:
             instance = source.source_fn()
@@ -382,7 +377,7 @@ def validate_incremental_cursor_required(ctx: ValidationContext) -> list[Validat
                     field=f"incremental.{resource_name}",
                     message=(
                         f"resource '{resource_name}' declares no incremental cursor, so every "
-                        f"{config.schedule.value} run of '{name}' re-extracts it in full. Add a "
+                        f"{config.schedule} run of '{name}' re-extracts it in full. Add a "
                         f"dlt.sources.incremental cursor on the provider's business timestamp "
                         f"(e.g. updated_at), or record the intent: "
                         f"[sources.{name}.dlt_ops.rule_exemptions] "

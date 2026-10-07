@@ -15,7 +15,6 @@ from click.testing import CliRunner
 
 from dlt_ops import (
     RuleSpec,
-    Schedule,
     SourceConfig,
     SourceInfo,
     ValidationContext,
@@ -158,7 +157,7 @@ def _make_ctx(
     """Build a minimal ValidationContext pointing at tmp_path/<pipeline>.
 
     When `schema_contract_evolve_reason` is passed, or `attach_config=True`,
-    a SourceConfig is attached to the SourceInfo (Schedule.HOURLY as a
+    a SourceConfig is attached to the SourceInfo ("@hourly" as a
     filler). Otherwise `SourceInfo.config` stays None — mirrors the orphan /
     misconfigured-source case. `config` is the raw config.toml dict exposed
     as `ctx.config` (empty when omitted).
@@ -168,7 +167,7 @@ def _make_ctx(
     source_config: SourceConfig | None = None
     if schema_contract_evolve_reason is not None or attach_config:
         source_config = SourceConfig(
-            schedule=Schedule.HOURLY,
+            schedule="@hourly",
             schema_contract_evolve_reason=schema_contract_evolve_reason,
         )
     source = SourceInfo(
@@ -1087,7 +1086,7 @@ class TestDestinationCapabilityValidator:
     def test_per_source_override_resolves_without_project_default(self, tmp_path):
         from dlt_ops.discovery.validators.config import validate_destination_capability
 
-        ctx = self._ctx(tmp_path, source_config=SourceConfig(schedule=Schedule.HOURLY, destination="duckdb"))
+        ctx = self._ctx(tmp_path, source_config=SourceConfig(schedule="@hourly", destination="duckdb"))
         assert validate_destination_capability(ctx) == []
 
     def test_registered_but_load_failing_adapter_is_error(self, tmp_path, extra_entry_points):
@@ -1666,8 +1665,8 @@ class TestSchemaContractValidator:
             f'import dlt\n\n@dlt.resource(name="res_b", {self.EVOLVE_LITERAL})\ndef _res_b():\n    yield []\n',
             encoding="utf-8",
         )
-        cfg_with_reason = SourceConfig(schedule=Schedule.HOURLY, schema_contract_evolve_reason="justified")
-        cfg_without = SourceConfig(schedule=Schedule.HOURLY)
+        cfg_with_reason = SourceConfig(schedule="@hourly", schema_contract_evolve_reason="justified")
+        cfg_without = SourceConfig(schedule="@hourly")
         source_a = SourceInfo(
             name="src_a",
             pipeline_name="webshop",
@@ -1705,7 +1704,7 @@ class TestSchemaContractValidator:
         (pipeline_dir / "res_a.py").write_text(
             f"import dlt\n\n@dlt.resource({self.CANONICAL})\ndef _res_a():\n    yield []\n", encoding="utf-8"
         )
-        cfg = SourceConfig(schedule=Schedule.HOURLY)
+        cfg = SourceConfig(schedule="@hourly")
         source_a = SourceInfo(
             name="src_a",
             pipeline_name="webshop",
@@ -1750,7 +1749,7 @@ class TestSchemaContractValidator:
         pipeline_dir = tmp_path / "multi"
         pipeline_dir.mkdir()
         (pipeline_dir / "res_x.py").write_text(body, encoding="utf-8")
-        cfg = SourceConfig(schedule=Schedule.HOURLY)
+        cfg = SourceConfig(schedule="@hourly")
         sources = {
             name: SourceInfo(
                 name=name,
@@ -1817,7 +1816,7 @@ class TestSchemaContractValidator:
 
         pipeline_dir = tmp_path / "shared_pipe"
         pipeline_dir.mkdir()
-        cfg = SourceConfig(schedule=Schedule.HOURLY)
+        cfg = SourceConfig(schedule="@hourly")
         source_a = SourceInfo(
             name="src_a",
             pipeline_name="shared_pipe",
@@ -1879,7 +1878,7 @@ class TestIncrementalCursorRequiredValidator:
 
         return build
 
-    def _ctx(self, tmp_path: Path, *, cursor: bool, schedule: Schedule = Schedule.DAILY) -> ValidationContext:
+    def _ctx(self, tmp_path: Path, *, cursor: bool, schedule: str = "@daily") -> ValidationContext:
         info = SourceInfo(
             name="cursor_probe",
             pipeline_name="probe",
@@ -1917,7 +1916,7 @@ class TestIncrementalCursorRequiredValidator:
     def test_manual_schedule_is_out_of_scope(self, tmp_path):
         """The harm is a full refresh repeating on a cadence; an on-demand
         source re-reads everything when someone asks it to."""
-        assert self._validate(self._ctx(tmp_path, cursor=False, schedule=Schedule.MANUAL)) == []
+        assert self._validate(self._ctx(tmp_path, cursor=False, schedule="@manual")) == []
 
     def test_source_without_parsed_config_is_skipped(self, tmp_path):
         info = SourceInfo(
@@ -1946,7 +1945,7 @@ class TestIncrementalCursorRequiredValidator:
             function_name="boom_source",
             resources=("events",),
             module_stem="boom_api",
-            config=SourceConfig(schedule=Schedule.DAILY),
+            config=SourceConfig(schedule="@daily"),
             source_fn=boom,
         )
         ctx = ValidationContext(sources={"boom_api": info}, config={}, project_root=tmp_path)

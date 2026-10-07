@@ -6,7 +6,7 @@ of rewriting the discovery/secrets/runner wiring. Core owns the
 orchestrator-neutral halves — WHAT runs once an orchestrator decides to fire:
 
 - :func:`scheduled_sources` — Phase-1 (pure AST) sources grouped by
-  :class:`Schedule`, safe wherever project code must never execute
+  schedule name, safe wherever project code must never execute
   (DAG parse time).
 - :func:`filtering_decision` / :func:`resolve_window` — the manual-trigger
   selection and date-window override DECISIONS as plain data; adapters map
@@ -15,8 +15,8 @@ orchestrator-neutral halves — WHAT runs once an orchestrator decides to fire:
   secrets through the secret-backend axis, then ``runner.run_pipeline``.
 
 Adapters keep only genuinely orchestrator-native mechanics: task shapes,
-skip exceptions, native data intervals, cron materialization of ``Schedule``
-values. No scheduling logic and no orchestrator import appears here.
+skip exceptions, native data intervals, cron materialization of schedule
+names. No scheduling logic and no orchestrator import appears here.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ import attrs
 import dlt
 import pendulum
 
-from dlt_ops.discovery.models import Schedule, SourceInfo
+from dlt_ops.discovery.models import SourceInfo
 from dlt_ops.discovery.phase1 import discover
 from dlt_ops.discovery.phase2 import introspect
 from dlt_ops.discovery.runner import run_pipeline
@@ -54,8 +54,8 @@ class RunDecision:
     reason: str = ""
 
 
-def scheduled_sources(project_root: Path) -> dict[Schedule, list[SourceInfo]]:
-    """Phase-1 sources grouped by ``Schedule`` (no/invalid config groups under MANUAL).
+def scheduled_sources(project_root: Path) -> dict[str, list[SourceInfo]]:
+    """Phase-1 sources grouped by schedule name (no/invalid config groups under ``"@manual"``).
 
     Pure AST — never imports project code, so orchestrator adapters may call
     it at parse/collection time (the DAG-parse foot-gun Phase 1 exists to

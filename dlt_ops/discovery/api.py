@@ -23,7 +23,7 @@ def get_source_schedules() -> dict[str, str]:
     Sources without config are excluded.
     """
     sources = get_sources()
-    return {info.config_section: info.config.schedule.value for info in sources.values() if info.config}
+    return {info.config_section: info.config.schedule for info in sources.values() if info.config}
 
 
 def get_source_resources() -> dict[str, tuple[str, ...]]:
