@@ -337,6 +337,17 @@ class TestScheduleCronMap:
         assert schedule_to_airflow("@2hourly") == "0 */2 * * *"
         assert schedule_to_airflow("@weekly") == "0 0 * * 1"
 
+    def test_declared_name_gives_its_cron(self):
+        from dlt_ops.airflow.factory import schedule_to_airflow
+
+        assert schedule_to_airflow("@daily0200", {"@daily0200": "0 2 * * *"}) == "0 2 * * *"
+
+    def test_unknown_name_raises(self):
+        from dlt_ops.airflow.factory import schedule_to_airflow
+
+        with pytest.raises(ValueError, match=r"Invalid schedule '@nope'"):
+            schedule_to_airflow("@nope")
+
 
 @needs_airflow
 class TestDagFactory:
@@ -349,6 +360,24 @@ class TestDagFactory:
         assert dags["dlt_daily"].schedule_interval == "@daily"
         assert dags["dlt_2hourly"].schedule_interval == "0 */2 * * *"
         assert dags["dlt_manual"].schedule_interval is None
+
+    def test_declared_schedule_builds_its_own_dag(self, make_project):
+        from dlt_ops.airflow.factory import build_schedule_dags
+
+        config = """
+            [dlt_ops]
+            [dlt_ops.schedules]
+            "@daily0200" = "0 2 * * *"
+
+            [sources.orders_api.dlt_ops]
+            schedule = "@daily0200"
+        """
+        root = make_project(config=config, files={"orders/source/orders_api.py": ORDERS_SOURCE})
+
+        dags = build_schedule_dags(root)
+
+        assert set(dags) == {"dlt_daily0200"}
+        assert dags["dlt_daily0200"].schedule_interval == "0 2 * * *"
 
     def test_task_ids_follow_adapter_contract(self, project):
         """{pipeline}.{source}_{resource} — one task per Phase-1 static resource."""

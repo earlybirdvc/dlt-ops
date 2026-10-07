@@ -1,17 +1,18 @@
 import inspect
 from typing import Any
 
+from dlt_ops._schedules import resolve_schedule
 from dlt_ops.assertions.config import parse_assertions
 from dlt_ops.config import (
     ProjectConfig,
     ProjectConfigError,
     UnresolvedDestinationError,
+    load_declared_schedules,
     load_project_config,
     resolve_destination,
 )
 from dlt_ops.destinations import core_mode_notice, has_adapter
 from dlt_ops.discovery.models import (
-    Schedule,
     ValidationContext,
     ValidationError,
 )
@@ -52,9 +53,18 @@ def validate_config_sections(ctx: ValidationContext) -> list[ValidationError]:
 
 
 def validate_schedules(ctx: ValidationContext) -> list[ValidationError]:
-    """Check schedule field exists and is one of the values in the Schedule enum."""
+    """Check schedule field exists and names a built-in or [dlt_ops.schedules] schedule.
+
+    An invalid [dlt_ops.schedules] table is one finding of its own; sources are
+    then checked against the built-in names only.
+    """
     errors: list[ValidationError] = []
     sources_config = ctx.config.get("sources", {})
+    try:
+        declared = load_declared_schedules(ctx.config)
+    except ProjectConfigError as exc:
+        errors.append(ValidationError(source_name="dlt_ops.schedules", field="schedules", message=str(exc)))
+        declared = {}
 
     for name, source in ctx.sources.items():
         section = sources_config.get(source.config_section, {})
@@ -71,7 +81,7 @@ def validate_schedules(ctx: ValidationContext) -> list[ValidationError]:
             )
         else:
             try:
-                Schedule.from_string(schedule_str)
+                resolve_schedule(schedule_str, declared)
             except ValueError as e:
                 errors.append(
                     ValidationError(

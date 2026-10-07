@@ -47,6 +47,11 @@ default_destination = "duckdb"
 # [dlt_ops.rules]
 # import_safety = true
 """
+    body += """
+# Extra named schedules a source can use as its `schedule` (5-field cron):
+# [dlt_ops.schedules]
+# "@daily0200" = "0 2 * * *"
+"""
     body += f"""
 # One [sources.<section>] table per source. The section name must equal the
 # source module stem (<pipeline>/{SOURCE_DIR}/<section>.py) and the explicit
@@ -56,7 +61,8 @@ default_destination = "duckdb"
 # base_url = "https://api.example.com"  # dlt-native source config
 #
 # [sources.my_api.dlt_ops]
-# schedule = "@daily"                   # required: @hourly|@daily|@weekly|@monthly|@manual
+# schedule = "@daily"                   # required: @hourly|@2hourly|@daily|@weekly|@monthly|@manual
+#                                       # or a name from [dlt_ops.schedules]
 # destination = "duckdb"                # optional; overrides default_destination
 # dataset = "raw_my_api"                # optional; overrides default_dataset
 """

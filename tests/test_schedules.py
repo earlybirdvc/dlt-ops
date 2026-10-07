@@ -5,15 +5,72 @@ rejected for the wrong reason would pass the test while leaving the intended
 check unproven. ``match=`` pins the reason.
 """
 
+import json
+from pathlib import Path
+
+import dlt
 import pytest
+from click.testing import CliRunner
 from croniter import croniter
 
-from dlt_ops import Schedule
+from dlt_ops import Schedule, SourceConfig, SourceInfo, ValidationContext
 from dlt_ops._schedules import parse_declared_schedules, resolve_schedule
+from dlt_ops.cli.cli import cli
 from dlt_ops.config import ProjectConfigError, load_project_config
+from dlt_ops.discovery.phase1 import discover
+from dlt_ops.discovery.validators.config import validate_schedules
+from dlt_ops.discovery.validators.platform_rules import validate_incremental_cursor_required
 from dlt_ops.plugins import registry as registry_mod
 
 VALID_CRON = "0 2 * * *"
+INVALID_CRON = "0 2 30 2 *"  # February 30 never occurs
+
+SOURCE_TEMPLATE = """
+    import dlt
+
+    @dlt.resource(name="rows")
+    def rows():
+        yield {{"id": 1}}
+
+    @dlt.source(name="{name}")
+    def {name}_source():
+        return rows
+"""
+
+
+@pytest.fixture(autouse=True)
+def _clean_plugin_registry():
+    # Loading a project config installs [dlt_ops.plugins] into the process-wide registry.
+    registry_mod._reset_for_tests()
+    yield
+    registry_mod._reset_for_tests()
+
+
+def _config(schedules: dict[str, str], **sources: str) -> str:
+    """A .dlt/config.toml body: one [dlt_ops.schedules] table and one schedule per source."""
+    lines = ["[dlt_ops]", 'default_destination = "duckdb"', 'default_dataset = "raw"', "[dlt_ops.schedules]"]
+    lines += [f'"{name}" = "{cron}"' for name, cron in schedules.items()]
+    for source, schedule in sources.items():
+        lines += [f"[sources.{source}.dlt_ops]", f'schedule = "{schedule}"']
+    return "\n".join(lines) + "\n"
+
+
+def _project(make_project, schedules: dict[str, str], **sources: str) -> Path:
+    files = {f"{name}/source/{name}.py": SOURCE_TEMPLATE.format(name=name) for name in sources}
+    return make_project(config=_config(schedules, **sources), files=files)
+
+
+def _source_info(name: str, schedule: str | None = None, source_fn=None) -> SourceInfo:
+    return SourceInfo(
+        name=name,
+        pipeline_name=name,
+        path=Path("/proj") / name,
+        function_name=f"{name}_source",
+        resources=("rows",),
+        module_stem=name,
+        config=SourceConfig(schedule=schedule) if schedule else None,
+        source_fn=source_fn,
+    )
 
 
 class TestAcceptedSchedules:
@@ -113,13 +170,6 @@ class TestResolveSchedule:
 
 
 class TestLoadProjectConfig:
-    @pytest.fixture(autouse=True)
-    def _clean_plugin_registry(self):
-        # load_project_config installs [dlt_ops.plugins] into the process-wide registry.
-        registry_mod._reset_for_tests()
-        yield
-        registry_mod._reset_for_tests()
-
     def test_absent_table_is_empty(self, make_project):
         assert load_project_config(make_project()).schedules == {}
 
@@ -133,3 +183,132 @@ class TestLoadProjectConfig:
         root = make_project(config='[dlt_ops]\n[dlt_ops.schedules]\n"@daily0200" = "61 2 * * *"\n')
         with pytest.raises(ProjectConfigError, match=r"\[dlt_ops\.schedules\]: .*not a valid cron expression"):
             load_project_config(root)
+
+
+class TestSourceConfig:
+    def test_enum_member_is_stored_as_a_plain_string(self):
+        schedule = SourceConfig(schedule=Schedule.DAILY).schedule
+        assert schedule == "@daily"
+        assert type(schedule) is str
+        assert f"{schedule}" == "@daily"
+
+
+class TestDiscover:
+    def test_declared_schedule_is_attached_to_the_source(self, make_project):
+        root = _project(make_project, {"@daily0200": VALID_CRON}, orders_api="@daily0200")
+        assert discover(root)["orders_api"].config.schedule == "@daily0200"
+
+    def test_invalid_table_fails_discovery(self, make_project):
+        root = _project(make_project, {"@daily0200": INVALID_CRON}, orders_api="@daily")
+        with pytest.raises(ProjectConfigError, match=r"\[dlt_ops\.schedules\]"):
+            discover(root)
+
+    def test_unknown_schedule_leaves_the_source_without_config(self, make_project):
+        root = _project(make_project, {"@daily0200": VALID_CRON}, orders_api="@nope")
+        assert discover(root)["orders_api"].config is None
+
+
+class TestValidateSchedulesRule:
+    @staticmethod
+    def _ctx(cron: str, schedule: str) -> ValidationContext:
+        config = {
+            "dlt_ops": {"schedules": {"@daily0200": cron}},
+            "sources": {"orders_api": {"dlt_ops": {"schedule": schedule}}},
+        }
+        sources = {"orders_api": _source_info("orders_api")}
+        return ValidationContext(sources=sources, config=config, project_root=Path("/proj"))
+
+    def test_declared_name_is_accepted(self):
+        assert validate_schedules(self._ctx(VALID_CRON, "@daily0200")) == []
+
+    def test_unknown_name_is_reported_with_the_declared_names(self):
+        findings = validate_schedules(self._ctx(VALID_CRON, "@nope"))
+        assert [(f.source_name, f.field) for f in findings] == [("orders_api", "schedule")]
+        assert "Invalid schedule '@nope'" in findings[0].message
+        assert "'@daily0200'" in findings[0].message
+
+    def test_invalid_table_is_one_project_finding(self):
+        findings = validate_schedules(self._ctx(INVALID_CRON, "@daily"))
+        assert len(findings) == 1
+        assert findings[0].source_name == "dlt_ops.schedules"
+        assert findings[0].field == "schedules"
+        assert findings[0].message.startswith("[dlt_ops.schedules]: ")
+        assert findings[0].is_warning is False
+
+
+def test_declared_schedule_is_in_scope_of_incremental_cursor_required():
+    """Only @manual is out of scope; a declared name recurs like a built-in one."""
+
+    @dlt.resource(name="rows")
+    def rows():
+        yield {"id": 1}
+
+    info = _source_info("orders_api", "@daily0200", source_fn=lambda: dlt.source(lambda: rows, name="orders_api")())
+    ctx = ValidationContext(sources={"orders_api": info}, config={}, project_root=Path("/proj"))
+    findings = validate_incremental_cursor_required(ctx)
+    assert [f.field for f in findings] == ["incremental.rows"]
+    assert "every @daily0200 run" in findings[0].message
+
+
+class TestCli:
+    @pytest.fixture
+    def runner(self) -> CliRunner:
+        return CliRunner()
+
+    def test_validate_reports_an_unknown_schedule(self, runner, make_project):
+        root = _project(make_project, {"@daily0200": VALID_CRON}, orders_api="@nope")
+        result = runner.invoke(cli, ["--root", str(root), "pipeline", "validate", "--json"])
+        assert result.exit_code == 1, result.output
+        schedule_findings = [f for f in json.loads(result.stdout) if f["field"] == "schedule"]
+        assert [f["source"] for f in schedule_findings] == ["orders_api"]
+        assert "Invalid schedule '@nope'" in schedule_findings[0]["message"]
+
+    def test_validate_accepts_a_declared_schedule(self, runner, make_project):
+        """The counterpart of the unknown-schedule case: only the schedule value differs."""
+        root = _project(make_project, {"@daily0200": VALID_CRON}, orders_api="@daily0200")
+        result = runner.invoke(cli, ["--root", str(root), "pipeline", "validate", "--json"])
+        assert [f for f in json.loads(result.stdout) if f["field"] == "schedule"] == []
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["list"],
+            ["list", "--json"],
+            ["validate"],
+            ["validate", "--json"],
+            ["resources", "--json"],
+            ["run", "--source", "orders_api"],
+            ["clean", "--source", "orders_api"],
+            ["reconcile", "--all"],
+            ["status"],
+        ],
+        ids=lambda argv: " ".join(argv),
+    )
+    def test_invalid_table_is_a_clean_error(self, runner, make_project, argv):
+        """Every verb resolves the project root first, and that step rejects the table."""
+        root = _project(make_project, {"@daily0200": INVALID_CRON}, orders_api="@daily")
+        result = runner.invoke(cli, ["--root", str(root), "pipeline", *argv])
+        assert result.exit_code == 1, result.output
+        assert isinstance(result.exception, SystemExit)  # no traceback
+        assert "Error: [dlt_ops.schedules]" in result.stderr
+
+    def test_list_filters_by_a_declared_schedule(self, runner, make_project):
+        root = _project(make_project, {"@daily0200": VALID_CRON}, orders_api="@daily0200", events_api="@daily")
+        result = runner.invoke(cli, ["--root", str(root), "pipeline", "list", "--schedule", "@daily0200"])
+        assert result.exit_code == 0, result.output
+        assert "Found 1 source(s)" in result.output
+        assert "orders_api" in result.output
+        assert "events_api" not in result.output
+
+    def test_list_rejects_an_unknown_filter_with_the_declared_names(self, runner, make_project):
+        root = _project(make_project, {"@daily0200": VALID_CRON}, orders_api="@daily0200")
+        result = runner.invoke(cli, ["--root", str(root), "pipeline", "list", "--schedule", "@nope"])
+        assert result.exit_code == 1
+        assert "Invalid schedule '@nope'" in result.output
+        assert "'@daily0200'" in result.output
+
+    def test_list_json_shows_the_declared_schedule(self, runner, make_project):
+        root = _project(make_project, {"@daily0200": VALID_CRON}, orders_api="@daily0200")
+        result = runner.invoke(cli, ["--root", str(root), "pipeline", "list", "--json"])
+        assert result.exit_code == 0, result.output
+        assert [(s["name"], s["schedule"]) for s in json.loads(result.stdout)] == [("orders_api", "@daily0200")]

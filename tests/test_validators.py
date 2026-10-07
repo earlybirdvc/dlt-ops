@@ -189,7 +189,7 @@ def _make_ctx(
 class TestRuleSpec:
     def test_description_is_first_docstring_line(self):
         spec = next(s for s in CORE_RULES if s.rule_id == "schedule_required")
-        assert spec.description == "Check schedule field exists and is one of the values in the Schedule enum."
+        assert spec.description == "Check schedule field exists and names a built-in or [dlt_ops.schedules] schedule."
 
     def test_immutable(self):
         spec = CORE_RULES[0]

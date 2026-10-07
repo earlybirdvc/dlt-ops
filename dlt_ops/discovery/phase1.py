@@ -20,14 +20,16 @@ escapes it.
 
 import ast
 import logging
-from collections.abc import Container
+from collections.abc import Container, Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import attrs
 
-from dlt_ops.config import RESOURCE_DIR, SOURCE_DIR, load_raw_config
-from dlt_ops.discovery.models import Schedule, SourceConfig, SourceInfo
+from dlt_ops._schedules import resolve_schedule
+from dlt_ops.config import RESOURCE_DIR, SOURCE_DIR, load_declared_schedules, load_raw_config
+from dlt_ops.discovery.models import SourceConfig, SourceInfo
 
 logger = logging.getLogger(__name__)
 
@@ -190,11 +192,18 @@ def _dedupe(items: list[str]) -> tuple[str, ...]:
     return tuple(out)
 
 
-def _parse_source_config(config: dict[str, Any], config_section: str) -> SourceConfig | None:
+def _parse_source_config(
+    config: dict[str, Any],
+    config_section: str,
+    declared: Mapping[str, str] = MappingProxyType({}),
+) -> SourceConfig | None:
     """Parse SourceConfig from config.toml section.
 
     All custom config keys are under [sources.X.dlt_ops]:
     - schedule, destination, dataset, airflow_var
+
+    ``declared`` holds the project's [dlt_ops.schedules] entries; a schedule
+    that is neither built-in nor declared gives ``None``.
 
     Only keys core itself acts on are parsed here (plus ``airflow_var``, which
     the CLI displays). Plugin-owned keys stay unparsed: a backend reads its own
@@ -213,7 +222,7 @@ def _parse_source_config(config: dict[str, Any], config_section: str) -> SourceC
         return None
 
     try:
-        schedule = Schedule.from_string(schedule_str).value
+        schedule = resolve_schedule(schedule_str, declared)
     except ValueError as e:
         logger.warning(f"Invalid schedule in [sources.{config_section}.dlt_ops]: {schedule_str} - {e}")
         return None
@@ -290,8 +299,10 @@ def discover(project_root: Path, *, include_unloadable: bool = False) -> dict[st
 
     Raises:
         ProjectConfigParseError: .dlt/config.toml exists but is broken TOML.
+        ProjectConfigError: [dlt_ops.schedules] holds an invalid entry.
     """
     config = load_raw_config(project_root)
+    declared = load_declared_schedules(config)
     sources: dict[str, SourceInfo] = {}
     unloadable: list[tuple[Path, Path, str]] = []
 
@@ -329,7 +340,7 @@ def discover(project_root: Path, *, include_unloadable: bool = False) -> dict[st
                     function_name=function_name,
                     resources=_dedupe([*scan.resources, *shared_resources]),
                     module_stem=py_file.stem,
-                    config=_parse_source_config(config, config_section),
+                    config=_parse_source_config(config, config_section, declared),
                     decorator_name=decorator_name,
                     module_path=py_file,
                     uses_checkpoints=scan.uses_checkpoints or shared_uses_checkpoints,

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import click
 
+from dlt_ops._schedules import resolve_schedule
 from dlt_ops.cli._common import _discover_with_progress, _with_progress, resolve_cli_project_root
 from dlt_ops.cli.backfill import backfill
 from dlt_ops.cli.status import status
@@ -15,12 +16,14 @@ from dlt_ops.config import (
     ProjectConfigError,
     UnresolvedDatasetError,
     UnresolvedDestinationError,
+    load_declared_schedules,
     load_project_config,
+    load_raw_config,
     resolve_dataset,
     resolve_destination,
 )
 from dlt_ops.destinations import ADAPTER_GATED_FEATURES, UnregisteredDestinationError, has_adapter
-from dlt_ops.discovery import Schedule, discover, validate_sources
+from dlt_ops.discovery import discover, validate_sources
 from dlt_ops.discovery.runner import run_pipeline
 from dlt_ops.discovery.validator import check_unknown_rule_ids, load_rule_specs, resolve_rules
 
@@ -40,7 +43,12 @@ def pipeline(ctx: click.Context) -> None:
 
 
 @pipeline.command("list")
-@click.option("--schedule", "-s", "filter_schedule", help="Filter by schedule (@hourly, @daily, etc.)")
+@click.option(
+    "--schedule",
+    "-s",
+    "filter_schedule",
+    help="Filter by schedule (built-in such as @daily, or a name from [dlt_ops.schedules])",
+)
 @click.option("--json", "output_json", is_flag=True, help="Output as JSON")
 @click.pass_context
 def list_sources(ctx: click.Context, filter_schedule: str | None, output_json: bool) -> None:
@@ -85,7 +93,8 @@ def list_sources(ctx: click.Context, filter_schedule: str | None, output_json: b
     # Filter by schedule if specified
     if filter_schedule:
         try:
-            target_schedule = Schedule.from_string(filter_schedule).value
+            declared = load_declared_schedules(load_raw_config(project_root))
+            target_schedule = resolve_schedule(filter_schedule, declared)
         except ValueError as e:
             click.echo(click.style(f"Error: {e}", fg="red"))
             sys.exit(1)

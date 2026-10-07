@@ -43,6 +43,11 @@ class Schedule(str, Enum):
         raise ValueError(f"Invalid schedule '{value}'. Valid: {valid}")
 
 
+def _plain_str(value: str) -> str:
+    """``value`` as a plain ``str``; a ``Schedule`` member becomes its value, not ``Schedule.X``."""
+    return str.__str__(value)
+
+
 @attrs.frozen
 class SourceConfig:
     """Config from config.toml for a source.
@@ -68,7 +73,7 @@ class SourceConfig:
       `loaded_at` is always ignored — no need to list it.
     """
 
-    schedule: str
+    schedule: str = attrs.field(converter=_plain_str)
     destination: str | None = None  # Destination override (project default if None)
     dataset: str | None = None  # Dataset override (project default if None)
     airflow_var: str | None = None  # Variable name for secrets (display only)

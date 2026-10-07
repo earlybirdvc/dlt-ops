@@ -67,8 +67,10 @@ except ModuleNotFoundError as exc:
 from dlt.helpers.airflow_helper import PipelineTasksGroup
 
 from dlt_ops import orchestration
+from dlt_ops._schedules import resolve_schedule
 from dlt_ops.airflow.runtime import pin_dlt_project_dir
 from dlt_ops.airflow.tasks import cleanup_old_dlt_files
+from dlt_ops.config import load_declared_schedules, load_raw_config
 from dlt_ops.discovery.models import Schedule
 from dlt_ops.runs.writer import TriggerSource
 
@@ -77,7 +79,8 @@ __all__ = ["SCHEDULE_CRON_MAP", "build_schedule_dags", "schedule_to_airflow"]
 logger = logging.getLogger(__name__)
 
 # Cron materialization of built-in schedule names is orchestrator policy, fixed by
-# design (opinionated, no config knob):
+# design (no config knob). A project's declared schedules carry their own cron
+# from [dlt_ops.schedules] instead. Built-in policy:
 # - "@2hourly" is not an Airflow preset; it materializes as `0 */2 * * *`
 #   (every even hour at :00).
 # - "@weekly" pins Monday 00:00 UTC: a scheduler fires when the interval
@@ -90,11 +93,22 @@ SCHEDULE_CRON_MAP: dict[str, str] = {
 }
 
 
-def schedule_to_airflow(schedule: str) -> str | None:
-    """Airflow ``schedule`` value for a schedule name: cron overrides first, presets pass through."""
+def schedule_to_airflow(schedule: str, declared: Mapping[str, str] | None = None) -> str | None:
+    """Airflow ``schedule`` value for a schedule name.
+
+    ``@manual`` gives ``None`` (trigger-only). A name from ``declared`` (the
+    project's [dlt_ops.schedules]) gives its cron. A built-in name gives its
+    ``SCHEDULE_CRON_MAP`` cron, or passes through as an Airflow preset.
+
+    Raises:
+        ValueError: the name is neither built-in nor declared.
+    """
     if schedule == Schedule.MANUAL:
         return None
-    return SCHEDULE_CRON_MAP.get(schedule, schedule)
+    if declared and schedule in declared:
+        return declared[schedule]
+    resolved = resolve_schedule(schedule, declared or {})
+    return SCHEDULE_CRON_MAP.get(resolved, resolved)
 
 
 def _execute_unit(
@@ -174,9 +188,13 @@ def build_schedule_dags(
         ``dag_id -> DAG``. Register them in the DAG file's module globals::
 
             globals().update(build_schedule_dags(Path(__file__).parent))
+
+    Raises:
+        ProjectConfigError: [dlt_ops.schedules] holds an invalid entry.
     """
     root = Path(project_root)
     groups = orchestration.scheduled_sources(root)
+    declared = load_declared_schedules(load_raw_config(root))
     resolved_start = start_date or pendulum.datetime(2024, 1, 1, tz="UTC")
     extra_dag_kwargs = dict(dag_kwargs) if dag_kwargs else {}
 
@@ -187,7 +205,7 @@ def build_schedule_dags(
         dag_id = f"{dag_prefix}_{schedule.removeprefix('@')}"
         with DAG(
             dag_id=dag_id,
-            schedule=schedule_to_airflow(schedule),
+            schedule=schedule_to_airflow(schedule, declared),
             start_date=resolved_start,
             catchup=catchup,
             **extra_dag_kwargs,

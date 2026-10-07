@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, TypeVar
 
 import click
 
-from dlt_ops.config import ProjectConfigError, find_project_root
+from dlt_ops.config import ProjectConfigError, find_project_root, load_declared_schedules, load_raw_config
 from dlt_ops.discovery import discover_sources
 
 if TYPE_CHECKING:
@@ -24,13 +24,17 @@ def resolve_cli_project_root(ctx: click.Context) -> Path:
 
     The CLI's fatal path around ``dlt_ops.config.find_project_root``:
     prints the typed error (which carries the ``dlt-ops init`` hint on a
-    miss) and ``sys.exit(1)``.
+    miss) and ``sys.exit(1)``. It also validates ``[dlt_ops.schedules]``,
+    which discovery reads, so every verb rejects an invalid declaration
+    here instead of with a traceback from inside discovery.
     """
     try:
-        return find_project_root(explicit=ctx.obj.get("project_root"))
+        root = find_project_root(explicit=ctx.obj.get("project_root"))
+        load_declared_schedules(load_raw_config(root))
     except ProjectConfigError as e:
         click.echo(click.style(f"Error: {e}", fg="red"), err=True)
         sys.exit(1)
+    return root
 
 
 def _with_progress(label: str, work: Callable[[], T]) -> T:
