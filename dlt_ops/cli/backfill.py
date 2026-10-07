@@ -255,7 +255,9 @@ def execute_backfill(
     completed = skipped = 0
     lost_chunk_ids: list[str] = []
 
-    with open_backfill_state(source.name, destination, dataset) as state:
+    with open_backfill_state(
+        source.name, destination, dataset, pipeline_name_template=project_config.pipeline_name_template
+    ) as state:
         state.ensure_table()
         state.seed_chunks(
             backfill_id=backfill_id,

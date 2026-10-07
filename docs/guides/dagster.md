@@ -135,7 +135,7 @@ Two things this recipe gets right by construction:
 
 **Native `@dlt_assets` turns one source into one Dagster asset per dlt table**, with column-level schema metadata in the asset graph — the reason `dagster-dlt` exists. It is the right choice only in a narrow case, because it makes two trades you must accept up front:
 
-- **It needs internal, no-stability helpers.** Building the matching `dlt.pipeline(...)` needs the effective destination, dataset, and the runtime `<source>_pipeline` name — none of them public: `SourceInfo.config` carries only per-source *overrides* (`None` when the source uses project defaults), and `SourceInfo.pipeline_name` is the pipeline *directory* name, not the runtime pipeline name. The recipe imports `load_project_config`, `resolve_destination`, `resolve_dataset`, and `pipeline_name_for_source`, none of which are in `dlt_ops.__all__` — so they carry no stability promise across minors.
+- **It needs internal, no-stability helpers.** Building the matching `dlt.pipeline(...)` needs the effective destination, dataset, and the runtime pipeline name (`pipeline_name_template` applied to the source name, `<source>_pipeline` by default) — none of them public: `SourceInfo.config` carries only per-source *overrides* (`None` when the source uses project defaults), and `SourceInfo.pipeline_name` is the pipeline *directory* name, not the runtime pipeline name. The recipe imports `load_project_config`, `resolve_destination`, `resolve_dataset`, and `pipeline_name_for_source`, none of which are in `dlt_ops.__all__` — so they carry no stability promise across minors.
 - **Dagster owns the run, so the dlt-ops operational layer is bypassed.** `@dlt_assets` calls `dlt.run` itself; it never goes through `dlt-ops pipeline run`. That means no runs-ledger row, no pre-load `fail`/`warn` assertions, and no checkpoint resume — everything that lives in the dlt-ops runner. You gain per-table lineage and give up the operational guarantees the CLI-driven asset keeps.
 
 **Choose native `@dlt_assets` only when per-table lineage matters more than the dlt-ops operational layer.** The internal helpers do resolve to real values — here against the example source:
@@ -144,12 +144,12 @@ Two things this recipe gets right by construction:
 from pathlib import Path
 from dlt_ops import discover_sources
 from dlt_ops.config import load_project_config, resolve_destination, resolve_dataset
-from dlt_ops.runs.writer import pipeline_name_for_source
+from dlt_ops.runs import pipeline_name_for_source
 
 root = Path(".")
 project = load_project_config(root)
 info = discover_sources(root)["github_events_api"]
-print(pipeline_name_for_source(info.name),
+print(pipeline_name_for_source(info.name, project.pipeline_name_template),
       resolve_destination(info.config, project),
       resolve_dataset(info.config, project))
 ```
@@ -170,7 +170,7 @@ from dagster_dlt import DagsterDltResource, dlt_assets
 from dlt_ops import discover_sources
 # Internal — not in dlt_ops.__all__, no stability promise across minors:
 from dlt_ops.config import load_project_config, resolve_destination, resolve_dataset
-from dlt_ops.runs.writer import pipeline_name_for_source
+from dlt_ops.runs import pipeline_name_for_source
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 project = load_project_config(PROJECT_ROOT)
@@ -180,7 +180,9 @@ info = discover_sources(PROJECT_ROOT)["github_events_api"]
 @dlt_assets(
     dlt_source=info.source_fn(),  # the live @dlt.source — this half is public
     dlt_pipeline=dlt.pipeline(
-        pipeline_name=pipeline_name_for_source(info.name),      # github_events_api_pipeline
+        pipeline_name=pipeline_name_for_source(                 # github_events_api_pipeline
+            info.name, project.pipeline_name_template
+        ),
         destination=resolve_destination(info.config, project),  # duckdb
         dataset_name=resolve_dataset(info.config, project),     # github_events_raw
     ),

@@ -54,7 +54,8 @@ from dlt_ops.discovery.validators.assertions import (
 )
 from dlt_ops.plugins import registry as registry_mod
 from dlt_ops.preflight import PluginNotRegisteredError, check_assertion_types
-from dlt_ops.runs.writer import RUNS_COLUMNS, RUNS_TABLE, pipeline_name_for_source
+from dlt_ops._pipeline_names import DEFAULT_PIPELINE_NAME_TEMPLATE, pipeline_name_for_source
+from dlt_ops.runs.writer import RUNS_COLUMNS, RUNS_TABLE
 from tests.test_runner import PROJECT_CONFIG, make_source_info
 
 _WORKER_ENV_VARS = ("NORMALIZE__WORKERS", "LOAD__WORKERS", "NORMALIZE__DATA_WRITER__FILE_MAX_ITEMS")
@@ -106,7 +107,7 @@ def _cfg(toml_text: str) -> dict[str, Any]:
 
 
 def _db_file(source_name: str) -> Path:
-    return Path.cwd() / f"{pipeline_name_for_source(source_name)}.duckdb"
+    return Path.cwd() / f"{pipeline_name_for_source(source_name, DEFAULT_PIPELINE_NAME_TEMPLATE)}.duckdb"
 
 
 def _query(source_name: str, sql: str) -> list[Any]:
@@ -658,7 +659,9 @@ class TestRunnerLifecycle:
             run_pipeline(make_source_info(name, lambda: _events_source(name, bad)), project_root=root)
 
         probe = dlt.pipeline(
-            pipeline_name=pipeline_name_for_source(name), destination="duckdb", dataset_name="analytics"
+            pipeline_name=pipeline_name_for_source(name, DEFAULT_PIPELINE_NAME_TEMPLATE),
+            destination="duckdb",
+            dataset_name="analytics",
         )
         assert probe.list_extracted_load_packages() == []
         assert not probe.has_pending_data
@@ -681,7 +684,7 @@ class TestRunnerLifecycle:
         assert loaded == {"/", "/x"}
 
         (rejected,) = _rejected_rows(name)
-        assert rejected["pipeline_name"] == pipeline_name_for_source(name)
+        assert rejected["pipeline_name"] == pipeline_name_for_source(name, DEFAULT_PIPELINE_NAME_TEMPLATE)
         assert rejected["source_section"] == name
         assert rejected["resource_name"] == "events"
         assert rejected["assertion_type"] == "unique_columns"
@@ -800,7 +803,9 @@ class TestRunnerLifecycle:
         # Nothing loaded, pending package dropped, ledger row failed.
         assert _query(name, "SELECT 1 FROM information_schema.tables WHERE table_name = 'events'") == []
         probe = dlt.pipeline(
-            pipeline_name=pipeline_name_for_source(name), destination="duckdb", dataset_name="analytics"
+            pipeline_name=pipeline_name_for_source(name, DEFAULT_PIPELINE_NAME_TEMPLATE),
+            destination="duckdb",
+            dataset_name="analytics",
         )
         assert probe.list_extracted_load_packages() == []
         (row,) = _runs_rows(name)

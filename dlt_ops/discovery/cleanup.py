@@ -370,6 +370,8 @@ def get_cleanup_plan(
     remote: bool,
     dataset_name: str | None,
     destination: Any = None,
+    *,
+    pipeline_name_template: str,
 ) -> dict:
     """Build a cleanup plan for display (dry-run info).
 
@@ -382,11 +384,15 @@ def get_cleanup_plan(
     plus a warning; a destination with no adapter is refused outright, because
     remote cleanup could not run anyway.
 
+    ``pipeline_name_template`` comes from the project config and decides which
+    pipeline the plan describes — both its remote tables and its local working
+    directory, so it is required even for a local-only plan.
+
     Returns dict with: pipeline_name, schema_name, working_dir, local_exists,
     is_full, target_resources, data_tables, resource_states, system_tables,
     warnings.
     """
-    pipeline_name = pipeline_name_for_source(source.name)
+    pipeline_name = pipeline_name_for_source(source.name, pipeline_name_template)
     schema_name = source.name
     working_dir = _pipeline_working_dir(pipeline_name)
     is_full = resources is None
@@ -441,6 +447,8 @@ def clean_pipeline(
     remote: bool,
     dataset_name: str | None,
     destination: Any = None,
+    *,
+    pipeline_name_template: str,
 ) -> dict[str, list[str]]:
     """Clean pipeline state and data.
 
@@ -461,6 +469,9 @@ def clean_pipeline(
         dataset_name: Destination dataset/schema; required when remote=True
         destination: dlt destination — name (e.g. "duckdb") or factory
             instance; required when remote=True
+        pipeline_name_template: Project-configured pipeline-name shape. Decides
+            which pipeline is cleaned, including the local working directory
+            this deletes, so it is required even when remote=False.
 
     Returns:
         {"local": [...], "remote": [...]} with cleaned items
@@ -469,7 +480,7 @@ def clean_pipeline(
 
     _validate_resources(source, resources)
 
-    pipeline_name = pipeline_name_for_source(source.name)
+    pipeline_name = pipeline_name_for_source(source.name, pipeline_name_template)
     schema_name = source.name
     working_dir = _pipeline_working_dir(pipeline_name)
     is_full = resources is None

@@ -55,7 +55,7 @@ from dlt_ops.config import (
 from dlt_ops.destinations import core_mode_notice, has_adapter
 from dlt_ops.discovery.models import SourceInfo, resolve_load_timestamp_column
 from dlt_ops.preflight import run_preflight
-from dlt_ops.runs.writer import (
+from dlt_ops.runs import (
     RunStatus,
     RunsWriter,
     dlt_run_id_from_load_info,
@@ -372,6 +372,10 @@ def run_pipeline(
     raw_config = load_raw_config(root)
     resolved_destination = destination or resolve_destination(source.config, project_config)
     resolved_dataset = dataset_name or resolve_dataset(source.config, project_config)
+    # Resolved once, before the ledger opens: the ledger writer, the dlt pipeline
+    # and every later reader must address the same name, and an unusable
+    # template must fail before anything is written.
+    resolved_pipeline_name = pipeline_name_for_source(source.name, project_config.pipeline_name_template)
     logger.info(f"Destination: {resolved_destination}, dataset: {resolved_dataset}")
 
     # The ledger opens here, at the first instant a run is recordable at all:
@@ -384,6 +388,7 @@ def run_pipeline(
     # preflight still lands a row; that is the intended reading. It failed, it
     # is a run, and `pipeline status` should say so.
     runs_writer = RunsWriter(
+        pipeline_name=resolved_pipeline_name,
         destination=resolved_destination,
         dataset=resolved_dataset,
         source_section=source.name,
@@ -449,7 +454,7 @@ def run_pipeline(
         )
 
         pipeline = dlt.pipeline(
-            pipeline_name=pipeline_name_for_source(source.name),
+            pipeline_name=resolved_pipeline_name,
             destination=resolved_destination,
             dataset_name=resolved_dataset,
             dev_mode=False,

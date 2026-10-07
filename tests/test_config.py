@@ -14,6 +14,7 @@ from dlt_ops.config import (
     resolve_dataset,
     resolve_destination,
 )
+from dlt_ops._pipeline_names import DEFAULT_PIPELINE_NAME_TEMPLATE
 from dlt_ops.discovery.models import Schedule, SourceConfig
 from dlt_ops.plugins import registry as registry_mod
 
@@ -221,6 +222,41 @@ class TestRequireDestinationAdapter:
     def test_non_bool_value_is_lenient_false(self, make_project):
         root = make_project(config='[dlt_ops]\nrequire_destination_adapter = "yes"\n')
         assert load_project_config(root).require_destination_adapter is False
+
+
+class TestPipelineNameTemplate:
+    """[dlt_ops].pipeline_name_template — the key a project sets to keep its existing dlt names."""
+
+    def test_absent_key_keeps_the_historical_name_shape(self, make_project):
+        assert load_project_config(make_project()).pipeline_name_template == DEFAULT_PIPELINE_NAME_TEMPLATE
+
+    def test_custom_template_parses_and_is_not_a_typo(self, make_project):
+        root = make_project(config='[dlt_ops]\npipeline_name_template = "{source}"\n')
+        config = load_project_config(root)
+        assert config.pipeline_name_template == "{source}"
+        # Registered in _KNOWN_PROJECT_KEYS, so it is never reported as a typo.
+        assert config.unknown_keys == ()
+
+    def test_template_without_the_source_placeholder_fails_loading(self, make_project):
+        """Loud, not lenient: a silently ignored template moves a project's dlt state."""
+        root = make_project(config='[dlt_ops]\npipeline_name_template = "one_pipeline"\n')
+        with pytest.raises(ProjectConfigError, match=r"\[dlt_ops\]\.pipeline_name_template.*no \{source\} placeholder"):
+            load_project_config(root)
+
+    def test_unknown_placeholder_fails_loading(self, make_project):
+        root = make_project(config='[dlt_ops]\npipeline_name_template = "{source}_{dataset}"\n')
+        with pytest.raises(ProjectConfigError, match=r"placeholder \{dataset\}"):
+            load_project_config(root)
+
+    def test_name_dlt_would_reject_fails_loading(self, make_project):
+        root = make_project(config='[dlt_ops]\npipeline_name_template = "pipelines/{source}"\n')
+        with pytest.raises(ProjectConfigError, match="which dlt rejects as a pipeline name"):
+            load_project_config(root)
+
+    def test_non_string_value_fails_loading(self, make_project):
+        root = make_project(config="[dlt_ops]\npipeline_name_template = 7\n")
+        with pytest.raises(ProjectConfigError, match="must be a string, got int"):
+            load_project_config(root)
 
 
 class TestDestinationResolution:

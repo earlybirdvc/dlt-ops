@@ -4,6 +4,11 @@ from typing import Any
 
 import attrs
 
+from dlt_ops._pipeline_names import (
+    DEFAULT_PIPELINE_NAME_TEMPLATE,
+    PIPELINE_NAME_TEMPLATE_KEY,
+    validate_pipeline_name_template,
+)
 from dlt_ops.discovery.models import SourceConfig
 from dlt_ops.plugins import set_disambiguation
 
@@ -40,6 +45,7 @@ _KNOWN_PROJECT_KEYS = frozenset(
         "alert_sink",
         "staleness_days",
         "require_destination_adapter",
+        PIPELINE_NAME_TEMPLATE_KEY,
     }
 )
 
@@ -93,6 +99,9 @@ class ProjectConfig:
       the adapter-backed surfaces (ledger, checkpoints) and want absence to
       be fatal. Default false: the core run loop works on any destination
       dlt resolves.
+    - pipeline_name_template: how a source name becomes its dlt pipeline name
+      (see dlt_ops._pipeline_names). An unusable value fails load_project_config
+      rather than silently renaming pipelines.
     - raw: the whole table, so consumers of not-yet-parsed keys
       (load_timestamp_column, injected_columns, ...) read one source of truth.
     - unknown_keys: top-level keys the package does not understand. Surfaced
@@ -106,6 +115,7 @@ class ProjectConfig:
     alert_sinks: tuple[str, ...] | None = None
     alert_sink_options: dict[str, dict[str, Any]] = attrs.field(factory=dict)
     require_destination_adapter: bool = False
+    pipeline_name_template: str = DEFAULT_PIPELINE_NAME_TEMPLATE
     raw: dict[str, Any] = attrs.field(factory=dict)
     unknown_keys: tuple[str, ...] = ()
 
@@ -180,7 +190,8 @@ def load_project_config(root: Path) -> ProjectConfig:
     Raises:
         ProjectRootNotFoundError: root has no [dlt_ops] table.
         ProjectConfigParseError: broken TOML.
-        ProjectConfigError: [dlt_ops.plugins] names an unknown plugin axis.
+        ProjectConfigError: [dlt_ops.plugins] names an unknown plugin axis, or
+            pipeline_name_template cannot produce valid pipeline names.
     """
     table = load_raw_config(root).get("dlt_ops")
     if not isinstance(table, dict):
@@ -192,6 +203,14 @@ def load_project_config(root: Path) -> ProjectConfig:
     raw_plugins = table.get("plugins")
     raw_sinks = table.get("alert_sinks")
     raw_sink_options = table.get("alert_sink")
+    # Validated before construction, not leniently parsed: a template that is
+    # ignored or silently corrected moves a project's pipeline names, and with
+    # them its dlt state and incremental cursors, without telling anyone.
+    raw_name_template = table.get(PIPELINE_NAME_TEMPLATE_KEY, DEFAULT_PIPELINE_NAME_TEMPLATE)
+    try:
+        validate_pipeline_name_template(raw_name_template)
+    except ValueError as exc:
+        raise ProjectConfigError(f"[dlt_ops].{PIPELINE_NAME_TEMPLATE_KEY}: {exc}") from exc
     config = ProjectConfig(
         default_destination=table.get("default_destination"),
         default_dataset=table.get("default_dataset"),
@@ -212,6 +231,7 @@ def load_project_config(root: Path) -> ProjectConfig:
             else {}
         ),
         require_destination_adapter=table.get("require_destination_adapter") is True,
+        pipeline_name_template=raw_name_template,
         raw=dict(table),
         unknown_keys=tuple(sorted(key for key in table if key not in _KNOWN_PROJECT_KEYS)),
     )

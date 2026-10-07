@@ -19,13 +19,15 @@ import dlt
 import duckdb
 import pytest
 
-from dlt_ops.config import UnresolvedDestinationError
+from dlt_ops.config import ProjectConfigError, UnresolvedDestinationError
 from dlt_ops.discovery.models import Schedule, SourceConfig, ValidationContext
 from dlt_ops.discovery.runner import run_pipeline
 from dlt_ops.discovery.validators import CORE_RULES
 from dlt_ops.discovery.validators.staleness import validate_stale_sources
+from dlt_ops._pipeline_names import DEFAULT_PIPELINE_NAME_TEMPLATE, pipeline_name_for_source
 from dlt_ops.preflight import MissingIncrementalCursorError
-from dlt_ops.runs.writer import RUNS_COLUMNS, RUNS_TABLE, RunsWriter, pipeline_name_for_source
+from dlt_ops.runs.reader import fetch_runs
+from dlt_ops.runs.writer import RUNS_COLUMNS, RUNS_TABLE, RunsWriter
 from tests.test_runner import PROJECT_CONFIG, make_source_info, simple_rows_source
 
 _WORKER_ENV_VARS = ("NORMALIZE__WORKERS", "LOAD__WORKERS", "NORMALIZE__DATA_WRITER__FILE_MAX_ITEMS")
@@ -45,8 +47,12 @@ def _isolate_run_env(tmp_path, monkeypatch):
             os.environ[var] = value
 
 
+def _pipeline_name(source_name: str) -> str:
+    return pipeline_name_for_source(source_name, DEFAULT_PIPELINE_NAME_TEMPLATE)
+
+
 def _db_file(source_name: str) -> Path:
-    return Path.cwd() / f"{pipeline_name_for_source(source_name)}.duckdb"
+    return Path.cwd() / f"{_pipeline_name(source_name)}.duckdb"
 
 
 def _query(source_name: str, sql: str, params: list[Any] | None = None) -> list[Any]:
@@ -88,7 +94,12 @@ def failing_source():
 class TestWriterUnit:
     def test_start_row_then_terminal_update(self):
         """write_start inserts status="running"; write_end flips it terminal in place."""
-        writer = RunsWriter(destination="duckdb", dataset="analytics", source_section="unit_src")
+        writer = RunsWriter(
+            pipeline_name=_pipeline_name("unit_src"),
+            destination="duckdb",
+            dataset="analytics",
+            source_section="unit_src",
+        )
 
         writer.write_start()
         (row,) = _runs_rows("unit_src")
@@ -109,10 +120,21 @@ class TestWriterUnit:
 
     def test_invalid_trigger_source_raises(self):
         with pytest.raises(ValueError, match="trigger_source"):
-            RunsWriter(destination="duckdb", dataset="analytics", source_section="s", trigger_source="cron")
+            RunsWriter(
+                pipeline_name=_pipeline_name("s"),
+                destination="duckdb",
+                dataset="analytics",
+                source_section="s",
+                trigger_source="cron",
+            )
 
     def test_invalid_terminal_status_logs_not_raises(self, caplog):
-        writer = RunsWriter(destination="duckdb", dataset="analytics", source_section="unit_src2")
+        writer = RunsWriter(
+            pipeline_name=_pipeline_name("unit_src2"),
+            destination="duckdb",
+            dataset="analytics",
+            source_section="unit_src2",
+        )
         writer.write_end(status="running")
         assert "Invalid terminal run status" in caplog.text
 
@@ -120,8 +142,12 @@ class TestWriterUnit:
         """A terminal UPDATE that matches no start row (start never landed) is a
         silent gap unless caught — it must log loudly at ERROR."""
         # Seed the ledger table (and an unrelated row) so the orphan UPDATE hits an existing table.
-        RunsWriter(destination="duckdb", dataset="analytics", source_section="gap_src").write_start()
-        orphan = RunsWriter(destination="duckdb", dataset="analytics", source_section="gap_src")
+        RunsWriter(
+            pipeline_name=_pipeline_name("gap_src"), destination="duckdb", dataset="analytics", source_section="gap_src"
+        ).write_start()
+        orphan = RunsWriter(
+            pipeline_name=_pipeline_name("gap_src"), destination="duckdb", dataset="analytics", source_section="gap_src"
+        )
 
         with caplog.at_level(logging.ERROR):
             orphan.write_end(status="completed")
@@ -133,7 +159,12 @@ class TestWriterUnit:
 
     def test_terminal_write_with_start_row_stays_quiet(self, caplog):
         """The loud gap warning is a true positive only: a normal start+end never trips it."""
-        writer = RunsWriter(destination="duckdb", dataset="analytics", source_section="quiet_src")
+        writer = RunsWriter(
+            pipeline_name=_pipeline_name("quiet_src"),
+            destination="duckdb",
+            dataset="analytics",
+            source_section="quiet_src",
+        )
         writer.write_start()
         with caplog.at_level(logging.ERROR):
             writer.write_end(status="completed")
@@ -148,7 +179,12 @@ class TestWriterCoreMode:
     def test_writes_skip_at_info_without_touching_the_destination(self, caplog, monkeypatch):
         boundary = MagicMock()
         monkeypatch.setattr("dlt_ops.runs.writer.open_destination_boundary", boundary)
-        writer = RunsWriter(destination="filesystem", dataset="analytics", source_section="fs_src")
+        writer = RunsWriter(
+            pipeline_name=_pipeline_name("fs_src"),
+            destination="filesystem",
+            dataset="analytics",
+            source_section="fs_src",
+        )
 
         with caplog.at_level(logging.INFO):
             writer.write_start()
@@ -394,3 +430,69 @@ class TestStaleness:
         run_pipeline(info, project_root=root)  # must not raise
         rows = _runs_rows("web_events")
         assert [row["status"] for row in rows] == ["completed", "completed"]
+
+
+BARE_NAME_CONFIG = PROJECT_CONFIG + 'pipeline_name_template = "{source}"\n'
+
+
+def _rows_for_pipeline(pipeline_name: str, dataset: str = "analytics") -> list[dict[str, Any]]:
+    with duckdb.connect(str(Path.cwd() / f"{pipeline_name}.duckdb")) as conn:
+        rows = conn.execute(
+            f"SELECT {', '.join(RUNS_COLUMNS)} FROM {dataset}.{RUNS_TABLE} ORDER BY started_at"
+        ).fetchall()
+    return [dict(zip(RUNS_COLUMNS, row, strict=True)) for row in rows]
+
+
+class TestConfiguredPipelineNameTemplate:
+    """A non-default [dlt_ops].pipeline_name_template must move every call site at once.
+
+    The DuckDB file name is the evidence that matters: it comes from the pipeline
+    name, so a site left on the old template writes to or reads from a different
+    database and reports "no runs recorded" rather than failing.
+    """
+
+    def test_runner_uses_the_configured_name_for_the_pipeline_and_its_database(self, make_project):
+        root = make_project(config=BARE_NAME_CONFIG)
+        pipeline = run_pipeline(make_source_info("web_events", simple_rows_source), project_root=root)
+
+        assert pipeline.pipeline_name == "web_events"
+        assert (Path.cwd() / "web_events.duckdb").exists()
+        assert not (Path.cwd() / "web_events_pipeline.duckdb").exists()
+
+    def test_ledger_row_records_the_configured_name(self, make_project):
+        root = make_project(config=BARE_NAME_CONFIG)
+        run_pipeline(make_source_info("web_events", simple_rows_source), project_root=root)
+
+        (row,) = _rows_for_pipeline("web_events")
+        assert row["pipeline_name"] == "web_events"
+        assert row["source_section"] == "web_events"
+        assert row["status"] == "completed"
+
+    def test_reader_finds_the_run_the_writer_recorded(self, make_project):
+        """A reader on the default name finds no ledger and returns None, instead of raising."""
+        root = make_project(config=BARE_NAME_CONFIG)
+        run_pipeline(make_source_info("web_events", simple_rows_source), project_root=root)
+
+        found = fetch_runs("web_events", "duckdb", "analytics", source_section="web_events")
+        assert found is not None
+        assert [record.status for record in found] == ["completed"]
+        assert fetch_runs("web_events_pipeline", "duckdb", "analytics", source_section="web_events") is None
+
+    def test_staleness_rule_reads_the_configured_name(self, make_project):
+        root = make_project(config=BARE_NAME_CONFIG)
+        run_pipeline(make_source_info("web_events", simple_rows_source), project_root=root)
+        with duckdb.connect(str(Path.cwd() / "web_events.duckdb")) as conn:
+            conn.execute(
+                f"UPDATE analytics.{RUNS_TABLE} SET started_at = ?",
+                [dt.datetime.now(dt.UTC) - dt.timedelta(days=30)],
+            )
+
+        findings = validate_stale_sources(_staleness_ctx(root))
+        assert len(findings) == 1
+        assert findings[0].source_name == "web_events"
+
+    def test_an_invalid_template_fails_the_run_before_the_ledger_opens(self, make_project):
+        root = make_project(config=PROJECT_CONFIG + 'pipeline_name_template = "one_pipeline"\n')
+        with pytest.raises(ProjectConfigError, match="pipeline_name_template"):
+            run_pipeline(make_source_info("web_events", simple_rows_source), project_root=root)
+        assert _runs_rows("web_events") == []

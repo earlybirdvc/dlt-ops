@@ -40,6 +40,7 @@ def render_config_toml(*, example_section: str | None = None, example_dataset: s
 [dlt_ops]
 default_destination = "duckdb"
 # default_dataset = "raw_data"          # project-wide dataset default
+# pipeline_name_template = "{source}"   # dlt pipeline name shape; default "{source}_pipeline"
 """
     body += """
 # Per-rule on/off knob for `pipeline validate` (missing entry = on):

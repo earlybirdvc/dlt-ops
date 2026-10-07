@@ -8,6 +8,7 @@ POSTGRES_URL is set, against Postgres — those are the ones that prove the drop
 actually happened.
 """
 
+import functools
 import importlib
 import json
 import logging
@@ -23,16 +24,22 @@ import dlt
 import pytest
 
 from dlt_ops import SourceInfo
+from dlt_ops._pipeline_names import DEFAULT_PIPELINE_NAME_TEMPLATE
 from dlt_ops.destinations import UnregisteredDestinationError
 from dlt_ops.discovery import cleanup as cleanup_module
 from dlt_ops.discovery.cleanup import (
     DLT_SYSTEM_TABLES,
     _clean_local_state_selective,
-    clean_pipeline,
-    get_cleanup_plan,
 )
 
 REPO_ROOT = Path(__file__).parent.parent
+
+# Bound to the default so every case below asserts the default name shape;
+# TestConfiguredPipelineName covers a non-default template.
+clean_pipeline = functools.partial(cleanup_module.clean_pipeline, pipeline_name_template=DEFAULT_PIPELINE_NAME_TEMPLATE)
+get_cleanup_plan = functools.partial(
+    cleanup_module.get_cleanup_plan, pipeline_name_template=DEFAULT_PIPELINE_NAME_TEMPLATE
+)
 
 
 def make_source(
@@ -1235,3 +1242,45 @@ class TestCleanupEndToEnd:
         assert not any(item.startswith("table:") for item in result["remote"])
         # The real pipeline's data is untouched
         assert self._count(e2e, "orgs_tbl") == 2
+
+
+class TestConfiguredPipelineName:
+    """A non-default [dlt_ops].pipeline_name_template must move both halves of cleanup.
+
+    The local half is the dangerous one: the working directory is deleted outright,
+    so a plan built on the default template would name — and `clean` would remove —
+    the directory of a pipeline this project never ran.
+    """
+
+    def test_plan_names_the_configured_pipeline_and_working_dir(self, dlt_home):
+        plan = cleanup_module.get_cleanup_plan(
+            source=make_source(),
+            resources=None,
+            local=True,
+            remote=False,
+            dataset_name=None,
+            pipeline_name_template="{source}",
+        )
+
+        assert plan["pipeline_name"] == "test_source"
+        assert plan["working_dir"] == dlt_home / "test_source"
+
+    def test_local_clean_removes_the_configured_directory_and_leaves_the_default_one(self, dlt_home):
+        configured = dlt_home / "test_source"
+        default = dlt_home / "test_source_pipeline"
+        for directory in (configured, default):
+            directory.mkdir(parents=True)
+            (directory / "state.json").write_text("{}", encoding="utf-8")
+
+        result = cleanup_module.clean_pipeline(
+            source=make_source(),
+            resources=None,
+            local=True,
+            remote=False,
+            dataset_name=None,
+            pipeline_name_template="{source}",
+        )
+
+        assert not configured.exists()
+        assert default.exists()
+        assert result["local"] == [str(configured)]

@@ -20,7 +20,7 @@ The insert point is that early on purpose: setup is where the failures the ledge
 
 | Column | Type | Meaning |
 |---|---|---|
-| `pipeline_name` | VARCHAR, not null | The dlt pipeline name (`<source>_pipeline`) |
+| `pipeline_name` | VARCHAR, not null | The dlt pipeline name the run used — `<source>_pipeline` unless the project sets [`pipeline_name_template`](../configuration/reference.md#project-level-dlt_ops) |
 | `source_section` | VARCHAR, not null | Config-section name of the source |
 | `resource_name` | VARCHAR | Set when the run was scoped to exactly one resource; NULL = source-level run |
 | `destination` | VARCHAR, not null | Resolved destination (engine) name |

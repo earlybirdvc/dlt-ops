@@ -17,10 +17,11 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+from dlt_ops._pipeline_names import DEFAULT_PIPELINE_NAME_TEMPLATE, pipeline_name_for_source
 from dlt_ops.cli.cli import cli
 from dlt_ops.discovery.runner import run_pipeline
 from dlt_ops.discovery.scanner import discover_sources
-from dlt_ops.runs.writer import RUNS_COLUMNS, pipeline_name_for_source
+from dlt_ops.runs.writer import RUNS_COLUMNS
 
 _WORKER_ENV_VARS = ("NORMALIZE__WORKERS", "LOAD__WORKERS", "NORMALIZE__DATA_WRITER__FILE_MAX_ITEMS")
 
@@ -130,7 +131,7 @@ class TestStatusMerge:
         _run_source(project, "orders_api")
         # Two sources -> two physical DuckDB files, each with its own ledger.
         for name in ("web_events", "orders_api"):
-            assert (tmp_path / f"{pipeline_name_for_source(name)}.duckdb").exists()
+            assert (tmp_path / f"{pipeline_name_for_source(name, DEFAULT_PIPELINE_NAME_TEMPLATE)}.duckdb").exists()
 
         result = _status(runner, project)
         assert result.exit_code == 0, result.output
@@ -290,3 +291,34 @@ class TestStatusGracefulPaths:
         for entry in data:
             assert list(entry) == ["source", "ledger", "error", "runs"]
             assert entry["runs"] == []
+
+
+class TestConfiguredPipelineNameTemplate:
+    """`status` must read back the ledger the runner wrote, whatever name shape is configured."""
+
+    @pytest.fixture
+    def bare_name_project(self, make_project) -> Path:
+        return make_project(
+            config=PROJECT_CONFIG.replace("[dlt_ops]\n", '[dlt_ops]\n    pipeline_name_template = "{source}"\n', 1),
+            files={
+                "web/source/web_events.py": WEB_EVENTS_SOURCE,
+                "orders/source/orders_api.py": ORDERS_SOURCE,
+            },
+        )
+
+    def test_status_reads_back_a_run_recorded_under_the_configured_name(self, runner, bare_name_project, tmp_path):
+        _run_source(bare_name_project, "web_events")
+        assert (tmp_path / "web_events.duckdb").exists()
+        assert not (tmp_path / "web_events_pipeline.duckdb").exists()
+
+        (entry,) = [e for e in _status_json(runner, bare_name_project) if e["source"] == "web_events"]
+        assert entry["ledger"] == "ok"
+        (run,) = entry["runs"]
+        assert run["status"] == "completed"
+        assert run["pipeline_name"] == "web_events"
+
+    def test_an_invalid_template_fails_status_with_the_key_named(self, runner, make_project):
+        root = make_project(config='[dlt_ops]\npipeline_name_template = "one_pipeline"\n')
+        result = _status(runner, root)
+        assert result.exit_code == 1
+        assert "pipeline_name_template" in result.output

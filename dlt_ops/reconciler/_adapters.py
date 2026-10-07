@@ -3,9 +3,9 @@
 Constructed per source from its resolved destination + dataset (the OSS
 config chain: ``[dlt_ops].default_*`` overridden by
 ``[sources.<X>.dlt_ops]``). Acquisition goes through the shared
-``open_destination_boundary`` on the pipeline name the runner used
-(``pipeline_name_for_source``), so file-based destinations resolve the same
-physical database the data run wrote.
+``open_destination_boundary`` on the pipeline name the runner used (derived
+from the project's ``pipeline_name_template``), so file-based destinations
+resolve the same physical database the data run wrote.
 
 Private module — the reconciler picks these up only when a caller passes
 ``fetcher=None`` / ``runner=None``. Tests inject their own protocol-shaped
@@ -54,14 +54,17 @@ class AdapterQueryRunner:
 
 @contextmanager
 def destination_defaults(
-    source_name: str, destination: str, dataset: str
+    source_name: str, destination: str, dataset: str, *, pipeline_name_template: str
 ) -> Iterator[tuple[AdapterSchemaFetcher, AdapterQueryRunner]]:
     """Open the source's destination boundary; yield default fetcher + runner.
 
-    The client closes when the ``with`` block exits, so detection must run
-    inside it.
+    ``pipeline_name_template`` must be the project's own value: on a file-based
+    destination the pipeline name selects the database, so another name reads
+    somewhere other than where the runner wrote. The client closes when the
+    ``with`` block exits, so detection must run inside it.
     """
-    with open_destination_boundary(pipeline_name_for_source(source_name), destination, dataset) as (adapter, client):
+    pipeline_name = pipeline_name_for_source(source_name, pipeline_name_template)
+    with open_destination_boundary(pipeline_name, destination, dataset) as (adapter, client):
         yield AdapterSchemaFetcher(adapter, client), AdapterQueryRunner(adapter, client)
 
 

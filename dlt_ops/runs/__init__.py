@@ -4,8 +4,15 @@ Written at every run/backfill start and end; read by ``pipeline status`` and
 the ``stale_sources`` Tier-1 rule. The ledger lives WHERE THE DATA LANDS
 (per destination + dataset) so status writes can never fail orthogonally to
 the data write succeeding.
+
+``pipeline_name_for_source`` stays importable from this package: the Dagster
+recipe in ``docs/guides/dagster.md`` imports it from here.
 """
 
+from dlt_ops._pipeline_names import (
+    DEFAULT_PIPELINE_NAME_TEMPLATE,
+    pipeline_name_for_source,
+)
 from dlt_ops.runs.reader import RunRecord, fetch_runs, latest_run_started_at
 from dlt_ops.runs.writer import (
     RUNS_COLUMNS,
@@ -16,13 +23,13 @@ from dlt_ops.runs.writer import (
     TriggerSource,
     dlt_run_id_from_load_info,
     new_run_id,
-    pipeline_name_for_source,
     record_counts_from_trace,
     runs_table_ddl,
     summarize_error,
 )
 
 __all__ = [
+    "DEFAULT_PIPELINE_NAME_TEMPLATE",
     "RUNS_COLUMNS",
     "RUNS_TABLE",
     "TRIGGER_SOURCES",

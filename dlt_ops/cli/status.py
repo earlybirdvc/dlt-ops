@@ -22,8 +22,8 @@ from dlt_ops.cli._common import _discover_with_progress, resolve_cli_project_roo
 from dlt_ops.config import ProjectConfigError, load_project_config, resolve_dataset, resolve_destination
 from dlt_ops.destinations import UnregisteredDestinationError
 from dlt_ops.discovery import discover
+from dlt_ops.runs import RunStatus, pipeline_name_for_source, summarize_error
 from dlt_ops.runs.reader import fetch_runs
-from dlt_ops.runs.writer import RunStatus, pipeline_name_for_source, summarize_error
 
 if TYPE_CHECKING:
     from dlt_ops.runs.reader import RunRecord
@@ -126,7 +126,7 @@ def status(ctx: click.Context, resource_name: str | None, limit: int, output_jso
             continue
         try:
             runs_by_source[name] = fetch_runs(
-                pipeline_name_for_source(name),
+                pipeline_name_for_source(name, project_config.pipeline_name_template),
                 destination,
                 dataset,
                 source_section=name,

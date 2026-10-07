@@ -585,9 +585,16 @@ def clean(
     # fallback: remote cleanup with an unresolved destination/dataset is a
     # config error.
     destination = None
+    # The pipeline-name template also names the local working directory this
+    # command deletes, so the project config is needed in every mode, not only
+    # for --remote.
+    try:
+        project_config = load_project_config(project_root)
+    except ProjectConfigError as e:
+        click.echo(click.style(f"Error: {e}", fg="red"), err=True)
+        sys.exit(1)
     if clean_remote:
         try:
-            project_config = load_project_config(project_root)
             if dataset_name is None:
                 dataset_name = resolve_dataset(src.config, project_config)
             destination = resolve_destination(src.config, project_config)
@@ -612,6 +619,7 @@ def clean(
             remote=clean_remote,
             dataset_name=dataset_name,
             destination=destination,
+            pipeline_name_template=project_config.pipeline_name_template,
         )
     except UnregisteredDestinationError as e:
         raise _remote_clean_refusal(destination) from e
@@ -691,6 +699,7 @@ def clean(
             remote=clean_remote,
             dataset_name=dataset_name,
             destination=destination,
+            pipeline_name_template=project_config.pipeline_name_template,
         )
 
         # Show success summary

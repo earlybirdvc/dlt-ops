@@ -63,7 +63,10 @@ def checkpoints():
     "--pipeline",
     "-p",
     required=True,
-    help="The dlt pipeline_name (source <X> runs as '<X>_pipeline'), not the dlt-ops source name.",
+    help=(
+        "The dlt pipeline_name (source <X> runs as '<X>_pipeline' unless "
+        "[dlt_ops].pipeline_name_template says otherwise), not the dlt-ops source name."
+    ),
 )
 @click.option(
     "--resource",
@@ -115,7 +118,10 @@ def cleanup(pipeline, resource, table, include_active):
     "--pipeline",
     "-p",
     required=True,
-    help="The dlt pipeline_name (source <X> runs as '<X>_pipeline'), not the dlt-ops source name.",
+    help=(
+        "The dlt pipeline_name (source <X> runs as '<X>_pipeline' unless "
+        "[dlt_ops].pipeline_name_template says otherwise), not the dlt-ops source name."
+    ),
 )
 @click.option(
     "--table",
