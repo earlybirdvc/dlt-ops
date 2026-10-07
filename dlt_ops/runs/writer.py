@@ -166,11 +166,8 @@ def runs_table_ddl(adapter: DestinationAdapter, dataset: str, table: str = RUNS_
 class RunsWriter:
     """Best-effort ledger writer bound to one run.
 
-    The ledger's physical location keys on the pipeline name, so the caller
-    passes the same resolved name it ran the pipeline under (derived once via
-    :func:`dlt_ops.runs.pipeline_name_for_source`) and every ledger reader
-    resolves that same location. The client is acquired schema-independently
-    through :func:`open_destination_boundary`, the same path the reader uses:
+    The client is acquired schema-independently through
+    :func:`open_destination_boundary`, the same path the ledger reader uses:
     ``write_start`` runs before extract, when a selective ``clean`` may have
     wiped the source's local schema file, and the ledger sidecar
     (``_dlt_ops_runs``) must never depend on the source's dlt schema to write a

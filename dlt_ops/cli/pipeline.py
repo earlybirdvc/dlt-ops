@@ -585,10 +585,9 @@ def clean(
     # fallback: remote cleanup with an unresolved destination/dataset is a
     # config error.
     destination = None
-    # The project config is read whatever the mode, because the pipeline-name
-    # template it carries also picks the local working directory this command
-    # deletes: loading it only for --remote would make a local-only clean target
-    # the directory of the default naming scheme instead of the configured one.
+    # The pipeline-name template also names the local working directory this
+    # command deletes, so the project config is needed in every mode, not only
+    # for --remote.
     try:
         project_config = load_project_config(project_root)
     except ProjectConfigError as e:

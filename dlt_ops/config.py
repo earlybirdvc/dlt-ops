@@ -100,11 +100,8 @@ class ProjectConfig:
       be fatal. Default false: the core run loop works on any destination
       dlt resolves.
     - pipeline_name_template: how a source name becomes its dlt pipeline name
-      (see dlt_ops._pipeline_names). Default DEFAULT_PIPELINE_NAME_TEMPLATE, so
-      a project that never sets it keeps the names dlt-ops has always used; a
-      project adopting dlt-ops over an existing dlt deployment sets it to the
-      shape its dlt state already lives under. An unusable value fails
-      load_project_config rather than silently renaming pipelines.
+      (see dlt_ops._pipeline_names). An unusable value fails load_project_config
+      rather than silently renaming pipelines.
     - raw: the whole table, so consumers of not-yet-parsed keys
       (load_timestamp_column, injected_columns, ...) read one source of truth.
     - unknown_keys: top-level keys the package does not understand. Surfaced

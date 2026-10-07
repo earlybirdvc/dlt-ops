@@ -626,9 +626,9 @@ class TestCleanPipelineNameTemplate:
             ],
         )
 
-        # Discovery loads the project config before `clean` does, and the CLI has
-        # never styled a config error raised there — the same is true of a bad
-        # [dlt_ops.plugins] axis. What matters here is that nothing is cleaned.
+        # Discovery loads the project config before `clean` does, so a bad template
+        # surfaces as an unstyled ProjectConfigError. What matters here is that
+        # nothing is cleaned.
         assert result.exit_code == 1
         assert isinstance(result.exception, ProjectConfigError)
         assert "pipeline_name_template" in str(result.exception)

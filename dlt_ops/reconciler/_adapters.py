@@ -58,10 +58,10 @@ def destination_defaults(
 ) -> Iterator[tuple[AdapterSchemaFetcher, AdapterQueryRunner]]:
     """Open the source's destination boundary; yield default fetcher + runner.
 
-    ``pipeline_name_template`` is the project-configured name shape: on a
-    file-based destination it selects the database file, so reading anything but
-    the runner's own name reads an empty one. The client closes when the ``with``
-    block exits, so detection must run inside it.
+    ``pipeline_name_template`` must be the project's own value: on a file-based
+    destination the pipeline name selects the database, so another name reads
+    somewhere other than where the runner wrote. The client closes when the
+    ``with`` block exits, so detection must run inside it.
     """
     pipeline_name = pipeline_name_for_source(source_name, pipeline_name_template)
     with open_destination_boundary(pipeline_name, destination, dataset) as (adapter, client):

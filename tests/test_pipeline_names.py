@@ -76,8 +76,8 @@ class TestRejectedTemplates:
             validate_pipeline_name_template("pipelines/{source}")
 
 
-class TestSourceNamesPassThrough:
-    """The renderer adds no rule of its own to source names — dlt owns that check."""
+class TestSourceNames:
+    """Source names pass through untouched, apart from the blank name this module rejects."""
 
     def test_hostile_source_name_is_not_rejected_here(self):
         hostile = 'x"; DROP TABLE users;--'
@@ -87,7 +87,8 @@ class TestSourceNamesPassThrough:
         with pytest.raises(ValueError, match="no {source} placeholder"):
             pipeline_name_for_source("web_events", "fixed_name")
 
-    def test_empty_source_name_is_rejected_although_dlt_would_accept_it(self):
-        """dlt answers an empty pipeline name with its own default, collapsing every source onto one state."""
+    @pytest.mark.parametrize("source_name", ["", "   "])
+    def test_blank_source_name_is_rejected(self, source_name):
+        """dlt answers the empty name with its own default name, so only dlt-ops can catch that one."""
         with pytest.raises(ValueError, match="source name is empty"):
-            pipeline_name_for_source("  ", "{source}")
+            pipeline_name_for_source(source_name, "{source}")

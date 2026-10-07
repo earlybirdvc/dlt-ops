@@ -250,12 +250,12 @@ Three options, in the order worth trying:
 
     Then nothing resets: the migrated run opens the same state, the same cursors and — on DuckDB — the same database file as before. The key is project-wide, so it fits a project whose names share a shape; names that differ source by source do not map onto one template, and those sources fall back to option 2 or 3.
 
-    The template is validated when the config loads. A missing `{source}`, any other placeholder, or a value that renders to a name dlt would reject fails the command with the key named, rather than silently moving your pipelines somewhere else.
+    An unusable value fails the command when the config loads, with the key named rather than silently moving your pipelines — see [`pipeline_name_template`](../configuration/reference.md#project-level-dlt_ops) for what counts as unusable.
 
 2. **Accept the one-time full refresh.** For `replace`/`merge` sources the first dlt-ops run rebuilds the dataset with no lasting difference, and every run after is incremental. This is the simplest path when the window is cheap to re-extract.
 3. **Align the name before cutover.** If a re-extract is expensive and the template cannot express your existing names, rename the legacy pipeline to the name dlt-ops will use and run it once on your existing schedule *before* migrating. The one-time re-extract then happens ahead of the cutover, and dlt-ops resumes the settled cursor. For DuckDB this also aligns the database filename, so the migrated pipeline reuses the same file and data instead of starting a new one.
 
-Changing `pipeline_name_template` on a project that is **already** running under dlt-ops is the same cutover in reverse, with the same cost: the names move, so the state does not follow. Migrating existing dlt state between names is not something dlt-ops does for you.
+Changing `pipeline_name_template` on a project that is **already** running under dlt-ops costs the same as the cutover above: the pipeline names move, and the dlt state stays behind under the old names. Migrating existing dlt state between names is not something dlt-ops does for you.
 
 ## The rest of your project keeps running
 

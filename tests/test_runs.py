@@ -48,7 +48,6 @@ def _isolate_run_env(tmp_path, monkeypatch):
 
 
 def _pipeline_name(source_name: str) -> str:
-    """The name the default template yields — what the writer and these assertions must agree on."""
     return pipeline_name_for_source(source_name, DEFAULT_PIPELINE_NAME_TEMPLATE)
 
 
@@ -437,7 +436,6 @@ BARE_NAME_CONFIG = PROJECT_CONFIG + 'pipeline_name_template = "{source}"\n'
 
 
 def _rows_for_pipeline(pipeline_name: str, dataset: str = "analytics") -> list[dict[str, Any]]:
-    """Ledger rows read straight from the named pipeline's own DuckDB file."""
     with duckdb.connect(str(Path.cwd() / f"{pipeline_name}.duckdb")) as conn:
         rows = conn.execute(
             f"SELECT {', '.join(RUNS_COLUMNS)} FROM {dataset}.{RUNS_TABLE} ORDER BY started_at"
@@ -471,7 +469,7 @@ class TestConfiguredPipelineNameTemplate:
         assert row["status"] == "completed"
 
     def test_reader_finds_the_run_the_writer_recorded(self, make_project):
-        """The silent-divergence case: the default name reads an absent ledger, it does not error."""
+        """A reader on the default name finds no ledger and returns None, instead of raising."""
         root = make_project(config=BARE_NAME_CONFIG)
         run_pipeline(make_source_info("web_events", simple_rows_source), project_root=root)
 

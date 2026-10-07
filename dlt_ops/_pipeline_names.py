@@ -1,14 +1,14 @@
 """Pipeline-name derivation — the single place a source name becomes a dlt pipeline name.
 
 dlt keys pipeline state on the pipeline name together with the destination and
-dataset; the name also becomes the local working directory
+dataset, and the name also becomes the local working directory
 (``~/.dlt/pipelines/<name>``) and, on file-based destinations such as DuckDB, the
-database filename. A project that adopts dlt-ops over an existing dlt deployment
-must therefore be able to keep the names its state already lives under, which is
-what the ``[dlt_ops] pipeline_name_template`` key configures.
+database filename. A project therefore chooses the shape through
+``[dlt_ops] pipeline_name_template``; ``docs/guides/adopt-existing-project.md``
+explains when to set it.
 
-This module imports nothing from ``dlt_ops``: both ``dlt_ops.config`` (which
-parses the key) and ``dlt_ops.runs`` (which renders it) depend on it.
+This module imports nothing from ``dlt_ops``, so neither ``dlt_ops.config`` nor
+``dlt_ops.runs`` gains an import cycle by depending on it.
 """
 
 from __future__ import annotations
@@ -18,10 +18,10 @@ import string
 from dlt.common.storages import FileStorage
 
 PIPELINE_NAME_TEMPLATE_KEY = "pipeline_name_template"
-"""The ``[dlt_ops]`` key holding the template — one copy, imported by config and docs tooling."""
+"""The ``[dlt_ops]`` key holding the template — the single copy of this key name."""
 
 DEFAULT_PIPELINE_NAME_TEMPLATE = "{source}_pipeline"
-"""The name shape dlt-ops has always used. Unset key = this value, so existing projects never move."""
+"""The default template. A project that does not set the key keeps this name shape."""
 
 SOURCE_PLACEHOLDER = "source"
 """The only placeholder a template may use. Adding another later cannot break an existing template."""
@@ -33,16 +33,11 @@ _PROBE_SOURCE_NAME = "probe"
 def validate_pipeline_name_template(template: object) -> None:
     """Raise ``ValueError`` when a template cannot produce usable pipeline names.
 
-    Each condition is checked on its own: the value is a string; its braces
-    parse; every placeholder is ``{source}`` with no conversion or format spec;
-    ``{source}`` appears at least once; and the rendered name is a component dlt
-    accepts. The last check calls
-    :meth:`FileStorage.validate_file_name_component`, the same function
-    ``dlt.pipeline()`` applies to a pipeline name, so dlt-ops can never drift
-    from dlt's own rule.
-
-    Validating a template means validating a *rendered* name: the file-name rule
-    bans ``{`` and ``}``, so the template itself never passes it.
+    The final check calls :meth:`FileStorage.validate_file_name_component`, the
+    same function ``dlt.pipeline()`` applies to a pipeline name, so this rule
+    cannot drift from dlt's own. It runs on a name rendered from a probe source
+    name, because that rule bans ``{`` and ``}`` and so no template can pass it
+    directly.
     """
     if not isinstance(template, str):
         raise ValueError(f"must be a string, got {type(template).__name__}")
@@ -54,17 +49,16 @@ def validate_pipeline_name_template(template: object) -> None:
 def pipeline_name_for_source(source_name: str, template: str) -> str:
     """The dlt pipeline name a source runs under.
 
-    Every caller derives the name here. The name is dlt's state key and, on
-    file-based destinations, the database filename, so a writer and a reader
-    that disagree on it address different data without any error.
+    A writer and a reader that derive this name differently address different
+    data without any error, so every caller derives it here.
 
-    The source name is otherwise passed through verbatim: screening it here
-    would add a rule on source names, and dlt already refuses a name it cannot
-    use when the pipeline is constructed. The empty name is the exception,
-    because dlt answers it with its own default name instead of an error.
+    The source name is passed through verbatim apart from the empty case: dlt
+    refuses a name it cannot use when the pipeline is constructed, but answers
+    an empty one with its own default name, which would put every source on one
+    pipeline state.
 
     Raises:
-        ValueError: the template is unusable, or the source name is empty.
+        ValueError: the template is unusable, or the source name is blank.
             ``load_project_config`` rejects a bad template up front, so that
             half is the backstop for a template arriving from elsewhere.
     """

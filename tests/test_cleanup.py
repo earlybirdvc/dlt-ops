@@ -34,9 +34,8 @@ from dlt_ops.discovery.cleanup import (
 
 REPO_ROOT = Path(__file__).parent.parent
 
-# The pipeline-name template is a required argument. Bound to the default here so
-# every case below keeps asserting the names dlt-ops has always produced; a
-# non-default template is exercised separately in TestConfiguredPipelineName.
+# Bound to the default so every case below asserts the default name shape;
+# TestConfiguredPipelineName covers a non-default template.
 clean_pipeline = functools.partial(cleanup_module.clean_pipeline, pipeline_name_template=DEFAULT_PIPELINE_NAME_TEMPLATE)
 get_cleanup_plan = functools.partial(
     cleanup_module.get_cleanup_plan, pipeline_name_template=DEFAULT_PIPELINE_NAME_TEMPLATE

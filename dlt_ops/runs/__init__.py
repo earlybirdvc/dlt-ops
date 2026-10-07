@@ -5,9 +5,8 @@ the ``stale_sources`` Tier-1 rule. The ledger lives WHERE THE DATA LANDS
 (per destination + dataset) so status writes can never fail orthogonally to
 the data write succeeding.
 
-``pipeline_name_for_source`` is re-exported here, from ``dlt_ops._pipeline_names``,
-because the ledger's physical location keys on the pipeline name: a reader that
-derives it differently from the writer reads a different database.
+``pipeline_name_for_source`` stays importable from this package: the Dagster
+recipe in ``docs/guides/dagster.md`` imports it from here.
 """
 
 from dlt_ops._pipeline_names import (
