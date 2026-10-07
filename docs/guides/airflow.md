@@ -14,7 +14,7 @@ This guide takes a dlt-ops project from `schedule` tags in TOML to running Airfl
 **Steps at a glance**
 
 1. [Install the adapter — and see what a bare install already has](#1-install-the-adapter-and-see-what-a-bare-install-already-has)
-2. [Put the project inside the dags folder](#2-put-the-project-inside-the-dags-folder)
+2. [Place the project next to the DAG file](#2-place-the-project-next-to-the-dag-file)
 3. [One DAG file builds everything](#3-one-dag-file-builds-everything)
 4. [What parse time is allowed to do: nothing of yours](#4-what-parse-time-is-allowed-to-do-nothing-of-yours)
 5. [Secrets from Airflow Variables](#5-secrets-from-airflow-variables)
@@ -59,7 +59,7 @@ python -c "from dlt_ops.airflow import build_schedule_dags"
 ImportError: Apache Airflow is not installed; the dlt-ops Airflow adapter requires it. Install the extra: pip install 'dlt-ops[airflow]'
 ```
 
-## 2. Put the project inside the dags folder
+## 2. Place the project next to the DAG file
 
 **The deployment layout is one DAG file plus the project tree next to it:**
 
@@ -75,7 +75,7 @@ dags/
         └── resource/
 ```
 
-Keeping the project root inside the dags folder is deliberate, not incidental: the adapter builds on dlt's own `PipelineTasksGroup`, which points dlt's config/secrets resolution at the dags folder — so the project's `.dlt/` directory serves both DAG-parse time and task run time from one place. Per-environment deployments are config, not code: prod and staging each get their own project root whose `config.toml` names the right destination and dataset through the normal [config chain](../configuration/index.md); the adapter adds no environment policy of its own.
+Keeping the project root inside the dags folder is a deployment convenience, not a requirement: the DAG file and the project travel together through whatever ships your dags folder (a sync sidecar, a baked image), so the scheduler and every worker see the same tree. dlt's own config resolution does not depend on the layout — the adapter builds on dlt's `PipelineTasksGroup`, whose constructor repoints dlt's config/secrets resolution at the dags folder, and the factory puts it back on your project root (see [Writing your own DAG factory](#writing-your-own-dag-factory)). Per-environment deployments are config, not code: prod and staging each get their own project root whose `config.toml` names the right destination and dataset through the normal [config chain](../configuration/index.md); the adapter adds no environment policy of its own.
 
 ## 3. One DAG file builds everything
 
@@ -166,6 +166,27 @@ Install the `[airflow]` extra and `airflow_var_required` joins the list (provide
 ```
 
 *(Triggering requires a live Airflow; the semantics below are the adapter contract, pinned by its tests.)* All keys are optional. `source` selects one source by config section — unselected units end in Airflow's *skipped* state, and a value naming no known source **fails** the run, because a typo must not skip the world silently. `resources` narrows within the selected source. `start_date`/`end_date` override the run window over Airflow's native `data_interval_start/end`, a partial override replacing just its edge — the injected window reaches every incremental resource through the runner, no per-source code. An empty conf runs everything with the native interval: a plain "clear and re-run" on a failed task re-extracts its own window. The [concept page](../concepts/scheduling-and-orchestration.md#manual-triggers) has the full decision rules; for large historical windows prefer `pipeline backfill`, which adds resumable [chunk state](backfill.md) no trigger conf carries.
+
+## Writing your own DAG factory
+
+**If you build DAGs yourself instead of calling `build_schedule_dags`, call `pin_dlt_project_dir` as the first statement inside each `PipelineTasksGroup` body:**
+
+```python
+from dlt.helpers.airflow_helper import PipelineTasksGroup
+
+from dlt_ops.airflow import pin_dlt_project_dir
+
+with PipelineTasksGroup(pipeline_name="github_events_api") as group:
+    pin_dlt_project_dir(project_root)
+    # ... your own operators
+```
+
+`PipelineTasksGroup.__init__` assigns `DLT_PROJECT_DIR` to Airflow's `dags_folder`. Without the call, dlt reads `config.toml` and `secrets.toml` from the dags folder instead of your project root, so a project placed anywhere else silently resolves the wrong config or none at all. The order matters: the constructor runs before the `with` body, so the first statement in the body is the right place, and the helper has to run before anything resolves dlt config.
+
+The helper does two things and both are needed. It restores `DLT_PROJECT_DIR`, and it rebuilds dlt's config provider chain — each provider caches the absolute file paths it was built with, so restoring the variable alone leaves a stale chain still reading the dags folder. It leaves `DLT_DATA_DIR` and `DLT_LOCAL_DIR` exactly as the task-group constructor set them, because `PipelineTasksGroup.add_run` requires a pipeline's working directory to sit inside `DLT_DATA_DIR`.
+
+!!! warning "Do not point `DLT_CONFIG_FOLDER` at an absolute path"
+    `DLT_CONFIG_FOLDER` renames the `.dlt` directory dlt looks for, and dlt joins that value onto **both** the project root and your home directory. An absolute value therefore replaces the home path as well, so it moves dlt's global directory onto whatever that absolute path points at. dlt writes an anonymous telemetry id file into the global directory at startup, and on a read-only DAG mount that write fails with `OSError: [Errno 30] Read-only file system`. Leave `DLT_CONFIG_FOLDER` unset and move the project root with `pin_dlt_project_dir` instead.
 
 ## Troubleshooting: `SecretNotFoundError` at task start
 

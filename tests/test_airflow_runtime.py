@@ -28,7 +28,11 @@ from click.testing import CliRunner
 # Keep any Airflow import (ours are lazy, inside tests) away from ~/airflow.
 os.environ.setdefault("AIRFLOW_HOME", os.path.join(tempfile.gettempdir(), "dltx-test-airflow-home"))
 
-from dlt_ops.airflow import AirflowVariableBackend, airflow_rules  # noqa: E402
+from dlt.common.configuration.container import Container  # noqa: E402
+from dlt.common.configuration.providers.toml import ConfigTomlProvider  # noqa: E402
+from dlt.common.configuration.specs.pluggable_run_context import PluggableRunContext  # noqa: E402
+
+from dlt_ops.airflow import AirflowVariableBackend, airflow_rules, pin_dlt_project_dir  # noqa: E402
 from dlt_ops.cli.plugins import plugins as plugins_cli  # noqa: E402
 from dlt_ops.discovery import Schedule, validate_sources  # noqa: E402
 from dlt_ops.discovery.phase2 import SOURCE_MODULE_NAMESPACE  # noqa: E402
@@ -127,8 +131,19 @@ def _isolate_dlt_env(monkeypatch):
     metastore in tests).
     """
     monkeypatch.setenv("PROVIDERS__ENABLE_AIRFLOW_SECRETS", "false")
-    for var in ("DLT_DATA_DIR", "DLT_LOCAL_DIR"):
-        monkeypatch.delenv(var, raising=False)
+    # Save and restore by hand: monkeypatch.delenv records nothing for a
+    # variable that was already absent, so it cannot undo the value the task
+    # group assigns during the test. A leaked DLT_DATA_DIR points every later
+    # test file at a scratch directory that no longer exists.
+    before = {var: os.environ.get(var) for var in ("DLT_DATA_DIR", "DLT_LOCAL_DIR")}
+    for var in before:
+        os.environ.pop(var, None)
+    yield
+    for var, value in before.items():
+        if value is None:
+            os.environ.pop(var, None)
+        else:
+            os.environ[var] = value
 
 
 @pytest.fixture
@@ -136,6 +151,32 @@ def clean_registry():
     registry_mod._reset_for_tests()
     yield
     registry_mod._reset_for_tests()
+
+
+def loaded_config_toml_locations() -> list[str]:
+    """Files the ConfigTomlProvider in dlt's live provider chain would read.
+
+    Do not assert on ``settings_dir`` instead. It is a property that re-reads
+    the environment variable, so the assertion passes whether or not the
+    provider chain was reloaded.
+    """
+    providers = Container()[PluggableRunContext].providers.providers
+    return [location for p in providers if isinstance(p, ConfigTomlProvider) for location in p.locations]
+
+
+@pytest.fixture
+def dlt_provider_chain():
+    """Undoes the provider reloads that a test triggers.
+
+    The dlt container is process-global, so a reload would otherwise stay in
+    place for every later test.
+    """
+    pluggable = Container()[PluggableRunContext]
+    cookie = pluggable.push_context()
+    try:
+        yield
+    finally:
+        pluggable.pop_context(cookie)
 
 
 @pytest.fixture
@@ -246,6 +287,30 @@ class TestImportHygiene:
         assert airflow_rules() == ()
 
 
+class TestPinDltProjectDirContract:
+    """The helper's own contract — no Airflow needed, so the required lane covers it."""
+
+    def test_exported_from_package(self):
+        from dlt_ops import airflow as airflow_pkg
+
+        assert "pin_dlt_project_dir" in airflow_pkg.__all__
+        assert "pin_dlt_project_dir" in dir(airflow_pkg)
+        assert airflow_pkg.pin_dlt_project_dir is pin_dlt_project_dir
+
+    def test_sets_env_var_and_reloads_providers(self, project, dlt_provider_chain, monkeypatch):
+        """A stale provider chain must end up reading the project's own config.toml."""
+        elsewhere = project.parent / "not-the-project"
+        elsewhere.mkdir()
+        monkeypatch.setenv("DLT_PROJECT_DIR", str(elsewhere))
+        Container()[PluggableRunContext].reload_providers()
+        assert str(elsewhere / ".dlt" / "config.toml") in loaded_config_toml_locations()
+
+        pin_dlt_project_dir(project)
+
+        assert os.environ["DLT_PROJECT_DIR"] == str(project)
+        assert str(project / ".dlt" / "config.toml") in loaded_config_toml_locations()
+
+
 @needs_airflow
 class TestScheduleCronMap:
     def test_2hourly_materializes_as_cron(self):
@@ -338,6 +403,52 @@ class TestDagFactory:
         dags = build_schedule_dags(project)
 
         assert all("cleanup_old_dlt_files" not in dag.task_ids for dag in dags.values())
+
+
+@needs_airflow
+class TestDagFactoryKeepsProjectDir:
+    """dlt's PipelineTasksGroup repoints DLT_PROJECT_DIR at the dags folder on construction."""
+
+    @pytest.fixture(autouse=True)
+    def _dags_folder_differs(self, project):
+        """Guard the premise: a pin that changed nothing would still pass otherwise."""
+        from airflow.configuration import conf
+
+        assert conf.get("core", "dags_folder") != str(project)
+
+    def test_project_dir_restored_after_build(self, project, dlt_provider_chain):
+        from dlt_ops.airflow.factory import build_schedule_dags
+
+        build_schedule_dags(project)
+
+        assert os.environ["DLT_PROJECT_DIR"] == str(project)
+
+    def test_config_provider_reads_project_toml(self, project, dlt_provider_chain):
+        """Restoring the env var is not enough: loaded providers cache their paths."""
+        from dlt_ops.airflow.factory import build_schedule_dags
+
+        build_schedule_dags(project)
+
+        assert str(project / ".dlt" / "config.toml") in loaded_config_toml_locations()
+
+    def test_pin_leaves_data_and_local_dir_alone(self, project, dlt_provider_chain):
+        """``PipelineTasksGroup.add_run`` requires a pipeline's working directory to sit
+        inside ``DLT_DATA_DIR``, so ``pin_dlt_project_dir`` must leave ``DLT_DATA_DIR``
+        and ``DLT_LOCAL_DIR`` as the task-group constructor set them.
+        """
+        from airflow import DAG
+        from dlt.common.known_env import DLT_DATA_DIR, DLT_LOCAL_DIR
+        from dlt.helpers.airflow_helper import PipelineTasksGroup
+
+        with DAG(dag_id="probe", schedule=None, start_date=pendulum.datetime(2024, 1, 1, tz="UTC")):
+            PipelineTasksGroup(pipeline_name="probe")
+        group_data_dir = os.environ[DLT_DATA_DIR]
+        group_local_dir = os.environ[DLT_LOCAL_DIR]
+
+        pin_dlt_project_dir(project)
+
+        assert os.environ[DLT_DATA_DIR] == group_data_dir
+        assert os.environ[DLT_LOCAL_DIR] == group_local_dir
 
 
 @needs_airflow

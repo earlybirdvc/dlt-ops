@@ -9,6 +9,10 @@ on Airflow primitives. Two surfaces with different import requirements:
   (secret-backend axis; imports Airflow lazily at fetch time) and
   :func:`airflow_rules` (validator provider; contributes no rules unless
   Airflow is installed).
+- :func:`pin_dlt_project_dir` (``runtime``) — not a plugin, but likewise
+  importable without Airflow: it touches only environment variables and
+  dlt's run context, so a custom DAG factory may call it from a module a
+  bare install also imports.
 - Adapter surface — hard Airflow imports, module-level guard with the install
   hint: :func:`build_schedule_dags` / ``SCHEDULE_CRON_MAP`` (``factory``) and
   :func:`cleanup_old_dlt_files` (``tasks``). Without the extra, importing
@@ -31,6 +35,7 @@ _INSTALL_HINT = (
     "requires it. Install the extra: pip install 'dlt-ops[airflow]'"
 )
 
+from dlt_ops.airflow.runtime import pin_dlt_project_dir  # noqa: E402
 from dlt_ops.airflow.secrets import AirflowVariableBackend  # noqa: E402
 from dlt_ops.airflow.validators import airflow_rules  # noqa: E402
 
@@ -40,6 +45,7 @@ __all__ = [
     "airflow_rules",
     "build_schedule_dags",
     "cleanup_old_dlt_files",
+    "pin_dlt_project_dir",
 ]
 
 # Adapter surface, resolved lazily (PEP 562) so the plugin surface above stays
