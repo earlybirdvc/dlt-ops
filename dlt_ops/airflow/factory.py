@@ -35,11 +35,14 @@ Adapter-internal contracts:
   and no Airflow-context mutation: the runner's injected
   ``TimeIntervalContext`` applies the bounds to every incremental resource.
 
-``project_root`` should live inside the Airflow dags folder: dlt's
-``PipelineTasksGroup`` points dlt's own config/secrets resolution at the dags
-folder, so keeping the project's ``.dlt/`` there gives one consistent config
-tree at parse and run time. Per-environment deployments point each
-environment at its own project root (see the package docstring).
+``project_root`` may sit anywhere the scheduler and the workers can read; it
+does not have to be inside the Airflow dags folder. Constructing dlt's
+``PipelineTasksGroup`` repoints dlt's own config/secrets resolution at the
+dags folder, and this factory undoes that with
+:func:`dlt_ops.airflow.pin_dlt_project_dir`, so the project's ``.dlt/``
+directory is what resolves at both parse and run time. Per-environment
+deployments point each environment at its own project root (see the package
+docstring).
 """
 
 from __future__ import annotations
@@ -64,6 +67,7 @@ except ModuleNotFoundError as exc:
 from dlt.helpers.airflow_helper import PipelineTasksGroup
 
 from dlt_ops import orchestration
+from dlt_ops.airflow.runtime import pin_dlt_project_dir
 from dlt_ops.airflow.tasks import cleanup_old_dlt_files
 from dlt_ops.discovery.models import Schedule
 from dlt_ops.runs.writer import TriggerSource
@@ -155,7 +159,7 @@ def build_schedule_dags(
 
     Args:
         project_root: dlt-ops project root (``.dlt/config.toml`` +
-            pipeline directories), normally inside the Airflow dags folder.
+            pipeline directories); any path the scheduler and workers can read.
         dag_prefix: dag-id prefix; ids are ``{dag_prefix}_{schedule-minus-@}``.
         start_date: DAG start date; defaults to 2024-01-01 UTC.
         catchup: Airflow catchup flag (off by default — missed windows are
@@ -191,6 +195,9 @@ def build_schedule_dags(
             task_groups = []
             for source in sources:
                 with PipelineTasksGroup(pipeline_name=source.name) as task_group:
+                    # Constructing the group assigns DLT_PROJECT_DIR to Airflow's
+                    # dags folder, so this call must come first in the body.
+                    pin_dlt_project_dir(root)
                     for resource in source.resources or (None,):
                         task_id = source.name if resource is None else f"{source.name}_{resource}"
                         PythonOperator(
