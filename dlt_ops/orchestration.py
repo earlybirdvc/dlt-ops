@@ -28,8 +28,8 @@ from typing import Any
 
 import attrs
 import dlt
-import pendulum
 
+from dlt_ops._datetimes import parse_datetime
 from dlt_ops.discovery.models import Schedule, SourceInfo
 from dlt_ops.discovery.phase1 import discover
 from dlt_ops.discovery.phase2 import introspect
@@ -99,16 +99,6 @@ def filtering_decision(
     return RunDecision(run=True)
 
 
-def _parse_edge(value: Any, field: str) -> datetime:
-    try:
-        parsed = pendulum.parse(str(value))
-        if not isinstance(parsed, pendulum.DateTime):
-            raise ValueError(f"expected a datetime, got {type(parsed).__name__}")
-    except Exception as exc:
-        raise ValueError(f"Invalid {field} format: {value!r}") from exc
-    return parsed
-
-
 def resolve_window(
     selection: Mapping[str, Any],
     *,
@@ -132,8 +122,8 @@ def resolve_window(
     if not raw_start and not raw_end:
         return native
     native_start, native_end = native if native is not None else (None, None)
-    start = _parse_edge(raw_start, "start_date") if raw_start else native_start
-    end = _parse_edge(raw_end, "end_date") if raw_end else native_end
+    start = parse_datetime(raw_start, "start_date") if raw_start else native_start
+    end = parse_datetime(raw_end, "end_date") if raw_end else native_end
     if start is None or end is None:
         missing = "start_date" if start is None else "end_date"
         raise ValueError(f"Date override needs both edges: no native interval supplies '{missing}'")

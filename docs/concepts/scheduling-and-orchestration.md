@@ -72,6 +72,35 @@ web_events                     web             @manual    1
 
 An adapter is therefore thin by construction: it keeps only what is genuinely native — task shapes, skip exceptions, its own data intervals, and the materialization of `Schedule` tags into its scheduling syntax.
 
+## Reading the run window inside a resource
+
+**Some resources need the run window but cannot let dlt filter rows by a cursor.** This happens when the API filters on the server side, for example with an `after=` parameter, or when the rows have no cursor field. The run still has a window. It comes from an orchestrator interval, from the `DLT_INTERVAL_START`/`DLT_INTERVAL_END` environment variables, or from the bounds of a [backfill](backfill.md) chunk. The [incremental loading helpers](../reference/api.md#incremental-loading-helpers) let the resource read that window and pass it to the API:
+
+```python
+import dlt
+from dlt_ops import WEBHOOK_CURSOR_FIELD, resolve_incremental_window
+
+
+@dlt.resource
+def events(
+    cursor=dlt.sources.incremental(
+        WEBHOOK_CURSOR_FIELD,
+        initial_value="2024-01-01T00:00:00Z",
+        on_cursor_value_missing="include",
+    ),
+):
+    since, until = resolve_incremental_window(cursor, None, None, lookback_hours=2)
+    yield from fetch_events(after=since, before=until)
+```
+
+**The cursor names a field that no row contains.** With `on_cursor_value_missing="include"`, dlt keeps every row, so the incremental filters nothing and only carries the window. `WEBHOOK_CURSOR_FIELD` is a JSONPath, not a bare name, because dlt adds a bare cursor name to the table schema as a column. The canonical freeze contract that dlt-ops applies ([`schema_contract_declared`](../configuration/rules.md#schema_contract_declared)) then fails the run on that unknown column.
+
+**`resolve_incremental_window` returns the `(since, until)` window to request.** It uses the first source that has a window: the injected interval, then the `incremental_start_value`/`incremental_end_value` config values (the second and third arguments), then the cursor's own start value. `until` is `None` when the window has no end.
+
+**Use `lookback_hours`, not dlt's `lag=`, to overlap runs.** Rows can arrive late. `lookback_hours` moves `since` earlier by that many hours, so each run reads the end of the previous window again. dlt's `lag=` cannot do this here, because it does not move `start_value` when an external interval is set. The overlap reads some rows twice, so give the resource a primary key and the `merge` write disposition.
+
+**Leave `allow_external_schedulers` unset on the incremental.** The runner turns it on when the run has an interval. A run without an interval, such as a local `pipeline run`, then falls back to the config values or the cursor's start value. If you set `allow_external_schedulers=True` yourself, that local run fails with `ExternalSchedulerNotAvailable`.
+
 ## The Airflow adapter
 
 **The adapter ships as the `[airflow]` extra (`pip install "dlt-ops[airflow]"`).** Its plugin surface — the Variable secret backend and the Airflow validator provider — is importable *without* Airflow, so a bare install's `validate` and `plugins doctor` stay healthy; the adapter surface hard-requires it and says so:

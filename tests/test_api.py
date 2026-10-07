@@ -26,6 +26,7 @@ PUBLIC_API = [
     "ValidationContext",
     "ValidationError",
     "Validator",
+    "WEBHOOK_CURSOR_FIELD",
     "cleanup_checkpoints",
     "detect_removal",
     "discover_sources",
@@ -36,6 +37,7 @@ PUBLIC_API = [
     "reconcile_all",
     "reconcile_source",
     "register",
+    "resolve_incremental_window",
     "validate_sources",
     "with_checkpoints",
 ]
