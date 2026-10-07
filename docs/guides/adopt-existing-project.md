@@ -28,7 +28,7 @@ You have a dlt project that works today — a script that calls `dlt.pipeline(..
 - one Pydantic `columns=` model per resource;
 - the operational verbs (`validate`, `status`, `reconcile`, `backfill`, `clean`) that read that structure.
 
-The one behavioral change to know about up front is the pipeline name — dlt-ops runs each source under a fixed `<source>_pipeline` name, which has consequences for existing state covered in [Existing data and incremental state](#existing-data-and-incremental-state) below.
+The one behavioral change to know about up front is the pipeline name — by default dlt-ops runs each source under a `<source>_pipeline` name, which is not necessarily the name your existing pipelines use. That name is dlt's state key, so it decides whether your incremental cursors carry over. One config key, `[dlt_ops].pipeline_name_template`, lets you keep the names you already have; see [Existing data and incremental state](#existing-data-and-incremental-state) below.
 
 ## The project you start from
 
@@ -103,7 +103,7 @@ The module keeps the naming chain the layout enforces — module stem `github_ap
 
 | Plain-dlt script | dlt-ops home |
 |---|---|
-| `pipeline_name=` | Derived as `<source>_pipeline` — not configurable |
+| `pipeline_name=` | Derived from the source section. `<source>_pipeline` by default; `[dlt_ops].pipeline_name_template` changes the shape project-wide (`"{source}"` keeps the bare section name) |
 | `destination=` | `[dlt_ops].default_destination`, or `[sources.<name>.dlt_ops].destination` to override per source |
 | `dataset_name=` | `[sources.<name>.dlt_ops].dataset`, or `[dlt_ops].default_dataset` project-wide |
 | cron / Makefile cadence | `[sources.<name>.dlt_ops].schedule` — a coarse tag, compiled by the orchestrator adapter |
@@ -206,7 +206,7 @@ That is a working migrated source: discovered by layout, validated statically, r
 
 ## Existing data and incremental state
 
-**This is the part most likely to surprise you.** dlt-ops runs every source under the pipeline name `<source>_pipeline` — here `github_api_pipeline` — and that name is fixed, derived from the source section, not read from config (`dlt_ops/runs/writer.py::pipeline_name_for_source`). If your old script used a different `pipeline_name` (`github`, above), dlt treats the migrated run as a **new pipeline**, and pipeline-scoped state does not carry over:
+**This is the part most likely to surprise you.** By default dlt-ops runs every source under the pipeline name `<source>_pipeline` — here `github_api_pipeline`. If your old script used a different `pipeline_name` (`github`, above), dlt treats the migrated run as a **new pipeline**, and pipeline-scoped state does not carry over:
 
 - **The DuckDB database file changes.** dlt names a DuckDB file after the pipeline, so the migrated run writes a fresh `github_api_pipeline.duckdb` beside the old `github.duckdb` — two physically separate databases. The old file is left untouched; its data is not migrated into the new one.
 - **Incremental cursors reset.** dlt stores each pipeline's incremental state under its pipeline name, so the new name starts with an empty cursor. The first dlt-ops run re-extracts the full window — all 4 issues again — and only then does the cursor settle. The second run is incremental as normal:
@@ -239,10 +239,23 @@ So on a warehouse, where the physical database is fixed by credentials and the d
 
 What that re-extract costs depends on write disposition. For `replace` and `merge` resources (primary key set) it is idempotent — the window is rebuilt in place and the dataset ends identical, as the `4` above shows. For an `append` resource it re-appends the window, so size the first run accordingly.
 
-Two honest options, both verified:
+Three options, in the order worth trying:
 
-1. **Accept the one-time full refresh (recommended default).** For `replace`/`merge` sources the first dlt-ops run rebuilds the dataset with no lasting difference, and every run after is incremental. This is the simplest path and correct for most projects.
-2. **Align the name before cutover.** If a re-extract is expensive, rename the legacy pipeline to `<source>_pipeline` and run it once on your existing schedule *before* migrating. The one-time re-extract then happens ahead of the cutover, and dlt-ops resumes the settled cursor. For DuckDB this also aligns the database filename, so the migrated pipeline reuses the same file and data instead of starting a new one.
+1. **Keep your existing names (recommended when they follow one pattern).** `[dlt_ops].pipeline_name_template` decides how a source's pipeline name is built, and `{source}` is its one placeholder. A project whose pipelines already run under the bare source name sets:
+
+    ```toml
+    [dlt_ops]
+    pipeline_name_template = "{source}"
+    ```
+
+    Then nothing resets: the migrated run opens the same state, the same cursors and — on DuckDB — the same database file as before. The key is project-wide, so it fits a project whose names share a shape; names that differ source by source do not map onto one template, and those sources fall back to option 2 or 3.
+
+    The template is validated when the config loads. A missing `{source}`, any other placeholder, or a value that renders to a name dlt would reject fails the command with the key named, rather than silently moving your pipelines somewhere else.
+
+2. **Accept the one-time full refresh.** For `replace`/`merge` sources the first dlt-ops run rebuilds the dataset with no lasting difference, and every run after is incremental. This is the simplest path when the window is cheap to re-extract.
+3. **Align the name before cutover.** If a re-extract is expensive and the template cannot express your existing names, rename the legacy pipeline to the name dlt-ops will use and run it once on your existing schedule *before* migrating. The one-time re-extract then happens ahead of the cutover, and dlt-ops resumes the settled cursor. For DuckDB this also aligns the database filename, so the migrated pipeline reuses the same file and data instead of starting a new one.
+
+Changing `pipeline_name_template` on a project that is **already** running under dlt-ops is the same cutover in reverse, with the same cost: the names move, so the state does not follow. Migrating existing dlt state between names is not something dlt-ops does for you.
 
 ## The rest of your project keeps running
 

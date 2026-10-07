@@ -26,8 +26,8 @@ from dlt_ops.config import (
     resolve_destination,
 )
 from dlt_ops.discovery.models import ValidationContext, ValidationError
+from dlt_ops.runs import pipeline_name_for_source
 from dlt_ops.runs.reader import latest_run_started_at
-from dlt_ops.runs.writer import pipeline_name_for_source
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ def validate_stale_sources(ctx: ValidationContext) -> list[ValidationError]:
             continue
         try:
             last = latest_run_started_at(
-                pipeline_name_for_source(name),
+                pipeline_name_for_source(name, project_config.pipeline_name_template),
                 destination,
                 dataset,
                 source_section=name,

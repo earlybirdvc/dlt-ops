@@ -25,6 +25,7 @@ import pydantic
 import pytest
 
 from dlt_ops import Schedule, SourceConfig, SourceInfo
+from dlt_ops._pipeline_names import DEFAULT_PIPELINE_NAME_TEMPLATE
 from dlt_ops.config import ProjectConfig
 from dlt_ops.destinations import ColumnInfo
 from dlt_ops.reconciler import _coverage as coverage_mod
@@ -147,6 +148,7 @@ def _project_config(
     injected_columns: tuple[str, ...] = (),
     default_destination: str | None = None,
     default_dataset: str | None = None,
+    pipeline_name_template: str = DEFAULT_PIPELINE_NAME_TEMPLATE,
 ) -> ProjectConfig:
     """Project-level [dlt_ops] view the reconciler reads.
 
@@ -161,6 +163,7 @@ def _project_config(
     return ProjectConfig(
         default_destination=default_destination,
         default_dataset=default_dataset,
+        pipeline_name_template=pipeline_name_template,
         raw=raw,
     )
 
@@ -1291,3 +1294,47 @@ class TestReconcilerEndToEndDuckDB:
         assert by_source["alpha_api"].findings == ()
         assert by_source["beta_api"].error is None
         assert [f.columns for f in by_source["beta_api"].findings] == [("beta_extra",)]
+
+
+@pytest.mark.integration
+class TestConfiguredPipelineNameTemplate:
+    """The reconciler opens the destination on the pipeline name, so it follows the template.
+
+    On DuckDB the pipeline name *is* the database file, so a reconciler left on
+    the default template would read an empty database and report no drift.
+    """
+
+    def test_detection_reads_the_configured_database(self, duckdb_home):
+        now = datetime.now(tz=UTC)
+        _seed(
+            "orders_api",
+            "raw_orders",
+            "order_items",
+            [
+                {
+                    "api_id": "a1",
+                    "order_id": "o1",
+                    "name": "first",
+                    "discount_code": "D1",
+                    "loaded_at": now,
+                    "surprise_column": "hello",
+                }
+            ],
+        )
+        source = _make_source(resources={"order_items": OrderItemModel}, injected_columns=())
+
+        result = additive_mod.reconcile_source(
+            "orders_api",
+            dry_run=True,
+            sources={"orders_api": source},
+            project_config=_project_config(
+                default_destination="duckdb",
+                default_dataset="raw_orders",
+                pipeline_name_template="{source}",
+            ),
+        )
+
+        assert result.error is None
+        assert [finding.columns for finding in result.findings] == [("surprise_column",)]
+        assert (duckdb_home / "orders_api.duckdb").exists()
+        assert not (duckdb_home / "orders_api_pipeline.duckdb").exists()

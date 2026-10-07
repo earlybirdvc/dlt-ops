@@ -49,7 +49,8 @@ from dlt_ops.runs.backfill_state import (
     default_claim_token,
     open_backfill_state,
 )
-from dlt_ops.runs.writer import RUNS_COLUMNS, RUNS_TABLE, pipeline_name_for_source
+from dlt_ops._pipeline_names import DEFAULT_PIPELINE_NAME_TEMPLATE, pipeline_name_for_source
+from dlt_ops.runs.writer import RUNS_COLUMNS, RUNS_TABLE
 from tests.test_runner import PROJECT_CONFIG, make_source_info
 
 _WORKER_ENV_VARS = ("NORMALIZE__WORKERS", "LOAD__WORKERS", "NORMALIZE__DATA_WRITER__FILE_MAX_ITEMS")
@@ -90,7 +91,7 @@ def make_incremental_source(name: str, rows: list[dict[str, Any]]) -> Any:
 
 
 def _db_file(source_name: str) -> Path:
-    return Path.cwd() / f"{pipeline_name_for_source(source_name)}.duckdb"
+    return Path.cwd() / f"{pipeline_name_for_source(source_name, DEFAULT_PIPELINE_NAME_TEMPLATE)}.duckdb"
 
 
 def _query(source_name: str, sql: str, params: list[Any] | None = None) -> list[Any]:
@@ -326,13 +327,17 @@ class TestResume:
     def test_seed_verifies_the_stored_triple(self):
         """The stored inputs are checked on resume, not just trusted via the hash."""
         chunks = [(day(1), day(2))]
-        with open_backfill_state("tamper_rows", "duckdb", "analytics") as state:
+        with open_backfill_state(
+            "tamper_rows", "duckdb", "analytics", pipeline_name_template=DEFAULT_PIPELINE_NAME_TEMPLATE
+        ) as state:
             state.ensure_table()
             state.seed_chunks(
                 backfill_id="bfid", chunks=chunks, backfill_from=day(1), backfill_to=day(2), chunk_size="1d"
             )
         _query("tamper_rows", f"UPDATE analytics.{BACKFILLS_TABLE} SET chunk_size = '2d'")
-        with open_backfill_state("tamper_rows", "duckdb", "analytics") as state:
+        with open_backfill_state(
+            "tamper_rows", "duckdb", "analytics", pipeline_name_template=DEFAULT_PIPELINE_NAME_TEMPLATE
+        ) as state:
             with pytest.raises(BackfillStateError, match="different inputs"):
                 state.seed_chunks(
                     backfill_id="bfid", chunks=chunks, backfill_from=day(1), backfill_to=day(2), chunk_size="1d"
@@ -348,7 +353,9 @@ class TestClaimOutcomes:
     """
 
     def _seed_one_chunk(self, source_name: str) -> None:
-        with open_backfill_state(source_name, "duckdb", "analytics") as state:
+        with open_backfill_state(
+            source_name, "duckdb", "analytics", pipeline_name_template=DEFAULT_PIPELINE_NAME_TEMPLATE
+        ) as state:
             state.ensure_table()
             state.seed_chunks(
                 backfill_id="bfid",
@@ -360,13 +367,17 @@ class TestClaimOutcomes:
 
     def test_foreign_token_on_the_row_is_the_only_lost_race(self):
         self._seed_one_chunk("claim_race")
-        with open_backfill_state("claim_race", "duckdb", "analytics") as state:
+        with open_backfill_state(
+            "claim_race", "duckdb", "analytics", pipeline_name_template=DEFAULT_PIPELINE_NAME_TEMPLATE
+        ) as state:
             assert state.claim("bfid", "000000", claimed_by="worker-a") is True
             # worker-a holds it now; worker-b loses the race, non-fatally.
             assert state.claim("bfid", "000000", claimed_by="worker-b") is False
 
     def test_missing_chunk_row_raises_instead_of_looking_like_a_lost_race(self):
-        with open_backfill_state("claim_missing", "duckdb", "analytics") as state:
+        with open_backfill_state(
+            "claim_missing", "duckdb", "analytics", pipeline_name_template=DEFAULT_PIPELINE_NAME_TEMPLATE
+        ) as state:
             state.ensure_table()
             with pytest.raises(BackfillStateError, match="missing from"):
                 state.claim("bfid", "000000", claimed_by="worker-a")
@@ -405,7 +416,9 @@ class TestHeldChunkAccounting:
     that cries wolf on a healthy concurrent run gets ignored like the old one."""
 
     def _seed_two_chunks(self, source_name: str, backfill_id: str) -> None:
-        with open_backfill_state(source_name, "duckdb", "analytics") as state:
+        with open_backfill_state(
+            source_name, "duckdb", "analytics", pipeline_name_template=DEFAULT_PIPELINE_NAME_TEMPLATE
+        ) as state:
             state.ensure_table()
             state.seed_chunks(
                 backfill_id=backfill_id,
@@ -426,7 +439,9 @@ class TestHeldChunkAccounting:
 
         def run_fn(source, **kwargs):
             # The other worker finishes its chunk while this one runs chunk 1.
-            with open_backfill_state(name, "duckdb", "analytics") as other:
+            with open_backfill_state(
+                name, "duckdb", "analytics", pipeline_name_template=DEFAULT_PIPELINE_NAME_TEMPLATE
+            ) as other:
                 other.mark_completed(backfill_id, "000001", claimed_by="other-host:99", records_loaded=1)
             return SimpleNamespace(last_trace=None)
 
@@ -484,7 +499,9 @@ class TestConcurrency:
         # Pre-seed so the workers race on claiming, not on DDL.
         chunks = compute_chunks(day(1), day(6), dt.timedelta(days=1))
         backfill_id = backfill_id_for("conc_rows", day(1), day(6), "1d")
-        with open_backfill_state("conc_rows", "duckdb", "analytics") as state:
+        with open_backfill_state(
+            "conc_rows", "duckdb", "analytics", pipeline_name_template=DEFAULT_PIPELINE_NAME_TEMPLATE
+        ) as state:
             state.ensure_table()
             state.seed_chunks(
                 backfill_id=backfill_id, chunks=chunks, backfill_from=day(1), backfill_to=day(6), chunk_size="1d"
@@ -770,7 +787,9 @@ class TestCliEndToEnd:
 
     def _seed_cli_window(self, backfill_id: str) -> None:
         """Seed the plan `_VALID_WINDOW` resolves to, so a chunk can be pre-held."""
-        with open_backfill_state("web_events", "duckdb", "analytics") as state:
+        with open_backfill_state(
+            "web_events", "duckdb", "analytics", pipeline_name_template=DEFAULT_PIPELINE_NAME_TEMPLATE
+        ) as state:
             state.ensure_table()
             state.seed_chunks(
                 backfill_id=backfill_id,
@@ -827,3 +846,17 @@ class TestCliEndToEnd:
 
         assert result.exit_code == 0, result.output
         assert "0 completed, 2 skipped" in result.output
+
+
+class TestConfiguredPipelineNameTemplate:
+    """Backfill chunk state lives in the pipeline's own database, so it follows the template too."""
+
+    def test_state_lands_in_the_configured_database(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DLT_DATA_DIR", str(tmp_path / "dlt-data"))
+        monkeypatch.chdir(tmp_path)
+
+        with open_backfill_state("web_events", "duckdb", "analytics", pipeline_name_template="{source}") as state:
+            state.ensure_table()
+
+        assert (tmp_path / "web_events.duckdb").exists()
+        assert not (tmp_path / "web_events_pipeline.duckdb").exists()

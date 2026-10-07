@@ -2,9 +2,10 @@
 
 Every run/backfill inserts a ``status="running"`` row before extract and
 updates it to a terminal status (``completed`` / ``failed`` / ``skipped``)
-when it ends. The writer receives the resolved (destination, dataset) pair
-from the caller — it never resolves them itself — and the ledger table lives
-in that same destination + dataset (per-destination location, CR1-4).
+when it ends. The writer receives the resolved (pipeline name, destination,
+dataset) triple from the caller — it never resolves them itself — and the
+ledger table lives in that same destination + dataset (per-destination
+location, CR1-4).
 
 Best-effort semantics mirror trace persistence in ``discovery/runner.py``:
 a ledger write failure logs loudly but never fails the data run — the data
@@ -78,16 +79,6 @@ TRIGGER_SOURCES = tuple(source.value for source in TriggerSource)
 """Valid trigger_source values in declaration order; the closed set is :class:`TriggerSource`."""
 
 _TERMINAL_STATUSES = frozenset(RunStatus) - {RunStatus.RUNNING}
-
-
-def pipeline_name_for_source(source_name: str) -> str:
-    """The dlt pipeline name the run path uses for a source.
-
-    Lives here because the ledger's physical location keys on it: file-based
-    destinations (DuckDB) resolve their database path from the pipeline name,
-    so every ledger reader must derive the same name the runner used.
-    """
-    return f"{source_name}_pipeline"
 
 
 def new_run_id() -> str:
@@ -175,11 +166,11 @@ def runs_table_ddl(adapter: DestinationAdapter, dataset: str, table: str = RUNS_
 class RunsWriter:
     """Best-effort ledger writer bound to one run.
 
-    The ledger's physical location keys on the pipeline name, which derives
-    from ``source_section`` (via :func:`pipeline_name_for_source`) — the same
-    derivation the reader uses, so writer and reader always resolve the same
-    location. The client is acquired schema-independently through
-    :func:`open_destination_boundary`, the same path the ledger reader uses:
+    The ledger's physical location keys on the pipeline name, so the caller
+    passes the same resolved name it ran the pipeline under (derived once via
+    :func:`dlt_ops.runs.pipeline_name_for_source`) and every ledger reader
+    resolves that same location. The client is acquired schema-independently
+    through :func:`open_destination_boundary`, the same path the reader uses:
     ``write_start`` runs before extract, when a selective ``clean`` may have
     wiped the source's local schema file, and the ledger sidecar
     (``_dlt_ops_runs``) must never depend on the source's dlt schema to write a
@@ -189,6 +180,9 @@ class RunsWriter:
     skip with one INFO line instead — ERROR means a real write failure.
 
     Args:
+        pipeline_name: Resolved dlt pipeline name of the run (ledger column
+            value, and the ledger's physical location on file-based
+            destinations).
         destination: Resolved destination adapter name (ledger column value).
         dataset: Resolved dataset the run writes to (ledger location + column).
         source_section: Config-section name of the source being run.
@@ -203,6 +197,7 @@ class RunsWriter:
     def __init__(
         self,
         *,
+        pipeline_name: str,
         destination: str,
         dataset: str,
         source_section: str,
@@ -213,6 +208,7 @@ class RunsWriter:
     ) -> None:
         if trigger_source not in TRIGGER_SOURCES:
             raise ValueError(f"invalid trigger_source {trigger_source!r}; valid: {', '.join(TRIGGER_SOURCES)}")
+        self.pipeline_name = pipeline_name
         self.destination = destination
         self.dataset = dataset
         self.source_section = source_section
@@ -250,9 +246,8 @@ class RunsWriter:
         if self._core_mode_skip():
             return
         started_at = datetime.now(UTC)
-        pipeline_name = pipeline_name_for_source(self.source_section)
         try:
-            with open_destination_boundary(pipeline_name, self.destination, self.dataset) as (adapter, client):
+            with open_destination_boundary(self.pipeline_name, self.destination, self.dataset) as (adapter, client):
                 insert_sql = (
                     f"INSERT INTO {adapter.render_table_ref(self.dataset, RUNS_TABLE)} "
                     "(pipeline_name, source_section, resource_name, destination, dataset, "
@@ -264,7 +259,7 @@ class RunsWriter:
                 adapter.execute_sql(
                     client,
                     insert_sql,
-                    pipeline_name,
+                    self.pipeline_name,
                     self.source_section,
                     self.resource_name,
                     self.destination,
@@ -304,9 +299,8 @@ class RunsWriter:
         if self._core_mode_skip():
             return
         completed_at = datetime.now(UTC)
-        pipeline_name = pipeline_name_for_source(self.source_section)
         try:
-            with open_destination_boundary(pipeline_name, self.destination, self.dataset) as (adapter, client):
+            with open_destination_boundary(self.pipeline_name, self.destination, self.dataset) as (adapter, client):
                 table_ref = adapter.render_table_ref(self.dataset, RUNS_TABLE)
                 update_sql = (
                     f"UPDATE {table_ref} "

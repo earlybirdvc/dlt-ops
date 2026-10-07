@@ -24,6 +24,7 @@ import pytest
 from click.testing import CliRunner
 
 from dlt_ops.cli import pipeline as pipeline_cli_mod
+from dlt_ops.config import ProjectConfigError
 from dlt_ops.cli.cli import cli
 from dlt_ops.destinations import ADAPTER_GATED_FEATURES, UnregisteredDestinationError
 
@@ -120,7 +121,7 @@ def cleanup_stub(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     mod = ModuleType("dlt_ops.discovery.cleanup")
     calls: dict[str, list[dict[str, Any]]] = {"get_cleanup_plan": [], "clean_pipeline": []}
 
-    def get_cleanup_plan(*, source, resources, local, remote, dataset_name, destination=None):
+    def get_cleanup_plan(*, source, resources, local, remote, dataset_name, destination=None, pipeline_name_template):
         calls["get_cleanup_plan"].append(
             {
                 "source": source.name,
@@ -129,6 +130,7 @@ def cleanup_stub(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
                 "remote": remote,
                 "dataset_name": dataset_name,
                 "destination": destination,
+                "pipeline_name_template": pipeline_name_template,
             }
         )
         return {
@@ -141,7 +143,7 @@ def cleanup_stub(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
             "system_tables": ["_dlt_loads"],
         }
 
-    def clean_pipeline(*, source, resources, local, remote, dataset_name, destination=None):
+    def clean_pipeline(*, source, resources, local, remote, dataset_name, destination=None, pipeline_name_template):
         calls["clean_pipeline"].append(
             {
                 "source": source.name,
@@ -150,6 +152,7 @@ def cleanup_stub(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
                 "remote": remote,
                 "dataset_name": dataset_name,
                 "destination": destination,
+                "pipeline_name_template": pipeline_name_template,
             }
         )
         return {"local": [], "remote": []}
@@ -561,3 +564,72 @@ class TestReconcileCommand:
         )
         assert result.exit_code == 1, result.output
         assert "coverage query failed" in result.output
+
+
+class TestCleanPipelineNameTemplate:
+    """`clean` resolves the configured template in every mode.
+
+    Local cleanup deletes the pipeline's working directory, and that directory is
+    named from the template — so reading the project config only for the remote
+    half would make a local-only clean target the wrong directory.
+    """
+
+    TEMPLATED_CONFIG = PROJECT_CONFIG.replace("[dlt_ops]\n", '[dlt_ops]\n    pipeline_name_template = "{source}"\n', 1)
+    INVALID_CONFIG = PROJECT_CONFIG.replace(
+        "[dlt_ops]\n", '[dlt_ops]\n    pipeline_name_template = "one_pipeline"\n', 1
+    )
+
+    def _project(self, make_project, config: str) -> Path:
+        return make_project(config=config, files={"github/source/github_events.py": GITHUB_EVENTS_SOURCE})
+
+    def test_local_only_clean_passes_the_configured_template(self, runner, make_project, cleanup_stub):
+        project = self._project(make_project, self.TEMPLATED_CONFIG)
+        result = runner.invoke(
+            cli,
+            [
+                "--root",
+                str(project),
+                "pipeline",
+                "clean",
+                "-s",
+                "github_events",
+                "--local-only",
+                "--auto-approve",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        for verb in ("get_cleanup_plan", "clean_pipeline"):
+            assert cleanup_stub.calls[verb][0]["remote"] is False
+            assert cleanup_stub.calls[verb][0]["pipeline_name_template"] == "{source}"
+
+    def test_remote_clean_passes_the_configured_template(self, runner, make_project, cleanup_stub):
+        project = self._project(make_project, self.TEMPLATED_CONFIG)
+        result = runner.invoke(cli, ["--root", str(project), "pipeline", "clean", "-s", "github_events", "--dry-run"])
+
+        assert result.exit_code == 0, result.output
+        assert cleanup_stub.calls["get_cleanup_plan"][0]["pipeline_name_template"] == "{source}"
+
+    def test_an_invalid_template_fails_clean_before_anything_is_removed(self, runner, make_project, cleanup_stub):
+        project = self._project(make_project, self.INVALID_CONFIG)
+        result = runner.invoke(
+            cli,
+            [
+                "--root",
+                str(project),
+                "pipeline",
+                "clean",
+                "-s",
+                "github_events",
+                "--local-only",
+                "--auto-approve",
+            ],
+        )
+
+        # Discovery loads the project config before `clean` does, and the CLI has
+        # never styled a config error raised there — the same is true of a bad
+        # [dlt_ops.plugins] axis. What matters here is that nothing is cleaned.
+        assert result.exit_code == 1
+        assert isinstance(result.exception, ProjectConfigError)
+        assert "pipeline_name_template" in str(result.exception)
+        assert cleanup_stub.calls["clean_pipeline"] == []

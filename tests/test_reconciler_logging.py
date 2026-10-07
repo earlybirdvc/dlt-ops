@@ -133,7 +133,7 @@ def test_discovery_failure_logs_one_warning(run, caplog, monkeypatch, tmp_path):
 def test_open_destination_failure_logs_one_warning(run, caplog, monkeypatch):
     from dlt_ops.reconciler import _adapters
 
-    def _boom(source_name, destination, dataset):
+    def _boom(source_name, destination, dataset, *, pipeline_name_template):
         raise RuntimeError("destination boom")
 
     monkeypatch.setattr(_adapters, "destination_defaults", _boom)

@@ -43,8 +43,8 @@ from typing import Any
 
 import attrs
 
+from dlt_ops._pipeline_names import pipeline_name_for_source
 from dlt_ops.destinations import DestinationAdapter, adapter_for_pipeline, open_client, throwaway_pipeline
-from dlt_ops.runs.writer import pipeline_name_for_source
 
 logger = logging.getLogger(__name__)
 
@@ -388,15 +388,17 @@ def open_backfill_state(
     destination: str,
     dataset: str,
     *,
+    pipeline_name_template: str,
     resource_name: str | None = None,
 ) -> Iterator[BackfillState]:
     """BackfillState over the source's own resolved destination + dataset.
 
-    The shared throwaway pipeline is only the client-acquisition vehicle,
-    named via ``pipeline_name_for_source`` so file-based destinations (DuckDB)
-    resolve the same physical database the data run uses.
+    The shared throwaway pipeline is only the client-acquisition vehicle, named
+    from the project's ``pipeline_name_template`` so file-based destinations
+    (DuckDB) resolve the same physical database the data run uses.
     """
-    with throwaway_pipeline(pipeline_name_for_source(source_section), destination, dataset) as pipeline:
+    pipeline_name = pipeline_name_for_source(source_section, pipeline_name_template)
+    with throwaway_pipeline(pipeline_name, destination, dataset) as pipeline:
         yield BackfillState(
             pipeline,
             destination=destination,

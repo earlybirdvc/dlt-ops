@@ -355,7 +355,12 @@ def run_detection(
 
             try:
                 default_fetcher, default_runner = stack.enter_context(
-                    destination_defaults(source.name, destination, resolved_dataset)
+                    destination_defaults(
+                        source.name,
+                        destination,
+                        resolved_dataset,
+                        pipeline_name_template=project_config.pipeline_name_template,
+                    )
                 )
             except Exception as exc:
                 sink.emit_error(exc, source_name=source_name, context="open_destination")
