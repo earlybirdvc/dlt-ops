@@ -102,7 +102,7 @@ Make an HTTP error raise instead of loading an empty page. The `response_hook_ra
 
 Read the run window inside a resource that dlt cannot filter by a cursor; see [reading the run window inside a resource](../concepts/scheduling-and-orchestration.md#reading-the-run-window-inside-a-resource).
 
-::: dlt_ops.WEBHOOK_CURSOR_FIELD
+::: dlt_ops.WINDOW_CURSOR_PATH
     options:
       show_root_heading: true
       heading_level: 3

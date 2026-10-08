@@ -33,7 +33,7 @@ from dlt_ops.discovery import (
     validate_sources,
 )
 from dlt_ops.http import raise_for_status
-from dlt_ops.incremental import WEBHOOK_CURSOR_FIELD, resolve_incremental_window
+from dlt_ops.incremental import WINDOW_CURSOR_PATH, resolve_incremental_window
 from dlt_ops.plugins import register
 from dlt_ops.pydantic_fields import drop_unknown_nulls, extract_model_column_names
 from dlt_ops.secrets import SecretBackend
@@ -64,7 +64,7 @@ __all__ = [
     "ValidationContext",
     "ValidationError",
     "Validator",
-    "WEBHOOK_CURSOR_FIELD",
+    "WINDOW_CURSOR_PATH",
     "cleanup_checkpoints",
     "detect_removal",
     "discover_sources",

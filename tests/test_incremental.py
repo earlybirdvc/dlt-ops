@@ -1,4 +1,4 @@
-"""Run-window helpers: the phantom ``WEBHOOK_CURSOR_FIELD`` cursor under a
+"""Run-window helpers: the ``WINDOW_CURSOR_PATH`` cursor under a
 frozen schema contract, ``resolve_incremental_window`` source precedence and
 lookback, and the runner end-to-end path with injected bounds.
 
@@ -18,7 +18,7 @@ import pendulum
 import pytest
 from dlt.pipeline.exceptions import PipelineStepFailed
 
-from dlt_ops import WEBHOOK_CURSOR_FIELD, resolve_incremental_window
+from dlt_ops import WINDOW_CURSOR_PATH, resolve_incremental_window
 from dlt_ops.discovery.runner import run_pipeline
 from tests.test_runner import PROJECT_CONFIG, _query, _table_columns, make_source_info
 
@@ -68,11 +68,11 @@ def _count(pipeline: Any) -> int:
     return _query(pipeline, "SELECT count(*) FROM analytics.events")[0][0]
 
 
-class TestPhantomCursor:
+class TestWindowCursor:
     def test_frozen_table_accepts_rows_and_gains_no_column(self):
-        pipeline = _frozen_pipeline("phantom_frozen")
-        pipeline.run(_cursor_resource(WEBHOOK_CURSOR_FIELD)())
-        assert "_webhook_cursor" not in _table_columns(pipeline, "analytics", "events")
+        pipeline = _frozen_pipeline("window_frozen")
+        pipeline.run(_cursor_resource(WINDOW_CURSOR_PATH)())
+        assert "_window_cursor" not in _table_columns(pipeline, "analytics", "events")
         assert _count(pipeline) == 1 + len(_ROWS)
 
     def test_binds_the_external_interval(self, monkeypatch):
@@ -83,7 +83,7 @@ class TestPhantomCursor:
         @dlt.resource(name="events")
         def events(
             cursor=dlt.sources.incremental(
-                WEBHOOK_CURSOR_FIELD,
+                WINDOW_CURSOR_PATH,
                 initial_value=_EPOCH,
                 on_cursor_value_missing="include",
                 allow_external_schedulers=True,
@@ -92,7 +92,7 @@ class TestPhantomCursor:
             seen.append((cursor.start_value, cursor.end_value))
             yield _ROWS
 
-        pipeline = dlt.pipeline(pipeline_name="phantom_interval", destination="duckdb", dataset_name="analytics")
+        pipeline = dlt.pipeline(pipeline_name="window_interval", destination="duckdb", dataset_name="analytics")
         pipeline.extract(events())
         assert seen == [(_START, _END)]
 
@@ -100,11 +100,11 @@ class TestPhantomCursor:
         """Control: the bare name adds a column, which the freeze contract rejects.
 
         If this stops failing on a future dlt, the JSONPath spelling of
-        ``WEBHOOK_CURSOR_FIELD`` may no longer be needed.
+        ``WINDOW_CURSOR_PATH`` may no longer be needed.
         """
         pipeline = _frozen_pipeline("bare_frozen")
-        with pytest.raises(PipelineStepFailed, match=r"_webhook_cursor.*frozen"):
-            pipeline.run(_cursor_resource("_webhook_cursor")())
+        with pytest.raises(PipelineStepFailed, match=r"_window_cursor.*frozen"):
+            pipeline.run(_cursor_resource("_window_cursor")())
 
 
 def _cursor(start_value: Any = None, end_value: Any = None) -> Any:
@@ -171,7 +171,7 @@ def _window_source(name: str, windows: list[tuple[Any, Any]], lookback_hours: in
 
     @dlt.resource(name="events")
     def events(
-        cursor=dlt.sources.incremental(WEBHOOK_CURSOR_FIELD, initial_value=_EPOCH, on_cursor_value_missing="include"),
+        cursor=dlt.sources.incremental(WINDOW_CURSOR_PATH, initial_value=_EPOCH, on_cursor_value_missing="include"),
     ):
         windows.append(resolve_incremental_window(cursor, None, None, lookback_hours=lookback_hours))
         yield _ROWS
@@ -186,7 +186,7 @@ class TestRunnerWindow:
         info = make_source_info("window_bounded", lambda: _window_source("window_bounded", windows, 2))
         pipeline = run_pipeline(info, project_root=root, bounds=(_START, _END))
         assert windows == [(_START - dt.timedelta(hours=2), _END)]
-        assert "_webhook_cursor" not in _table_columns(pipeline, "analytics", "events")
+        assert "_window_cursor" not in _table_columns(pipeline, "analytics", "events")
         assert _count(pipeline) == len(_ROWS)
 
     def test_plain_run_uses_initial_value(self, make_project):

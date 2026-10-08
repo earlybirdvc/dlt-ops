@@ -9,7 +9,7 @@ run bounds. The helpers read that window from a ``dlt.sources.incremental``::
     @dlt.resource
     def events(
         cursor=dlt.sources.incremental(
-            WEBHOOK_CURSOR_FIELD,
+            WINDOW_CURSOR_PATH,
             initial_value="2024-01-01T00:00:00Z",
             on_cursor_value_missing="include",
         ),
@@ -17,7 +17,7 @@ run bounds. The helpers read that window from a ``dlt.sources.incremental``::
         since, until = resolve_incremental_window(cursor, None, None, lookback_hours=2)
         yield from fetch_events(after=since, before=until)
 
-:data:`WEBHOOK_CURSOR_FIELD` is a cursor path that no row contains. With
+:data:`WINDOW_CURSOR_PATH` is a cursor path that no row contains. With
 ``on_cursor_value_missing="include"``, dlt keeps every row.
 
 :func:`resolve_incremental_window` returns the window as ``(since, until)``. It
@@ -40,9 +40,9 @@ from dlt.extract.incremental import Incremental
 
 from dlt_ops._datetimes import parse_datetime
 
-__all__ = ["WEBHOOK_CURSOR_FIELD", "resolve_incremental_window"]
+__all__ = ["WINDOW_CURSOR_PATH", "resolve_incremental_window"]
 
-WEBHOOK_CURSOR_FIELD = "$['_webhook_cursor']"
+WINDOW_CURSOR_PATH = "$['_window_cursor']"
 """Cursor path for an incremental whose rows carry no cursor value.
 
 It is spelled as a JSONPath on purpose. dlt adds a bare cursor name to the

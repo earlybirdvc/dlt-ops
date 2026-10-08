@@ -78,13 +78,13 @@ An adapter is therefore thin by construction: it keeps only what is genuinely na
 
 ```python
 import dlt
-from dlt_ops import WEBHOOK_CURSOR_FIELD, resolve_incremental_window
+from dlt_ops import WINDOW_CURSOR_PATH, resolve_incremental_window
 
 
 @dlt.resource
 def events(
     cursor=dlt.sources.incremental(
-        WEBHOOK_CURSOR_FIELD,
+        WINDOW_CURSOR_PATH,
         initial_value="2024-01-01T00:00:00Z",
         on_cursor_value_missing="include",
     ),
@@ -93,7 +93,7 @@ def events(
     yield from fetch_events(after=since, before=until)
 ```
 
-**The cursor names a field that no row contains.** With `on_cursor_value_missing="include"`, dlt keeps every row, so the incremental filters nothing and only carries the window. `WEBHOOK_CURSOR_FIELD` is a JSONPath, not a bare name, because dlt adds a bare cursor name to the table schema as a column. The canonical freeze contract that dlt-ops applies ([`schema_contract_declared`](../configuration/rules.md#schema_contract_declared)) then fails the run on that unknown column.
+**The cursor names a field that no row contains.** With `on_cursor_value_missing="include"`, dlt keeps every row, so the incremental filters nothing and only carries the window. `WINDOW_CURSOR_PATH` is a JSONPath, not a bare name, because dlt adds a bare cursor name to the table schema as a column. The canonical freeze contract that dlt-ops applies ([`schema_contract_declared`](../configuration/rules.md#schema_contract_declared)) then fails the run on that unknown column.
 
 **`resolve_incremental_window` returns the `(since, until)` window to request.** It uses the first source that has a window: the injected interval, then the `incremental_start_value`/`incremental_end_value` config values (the second and third arguments), then the cursor's own start value. `until` is `None` when the window has no end.
 

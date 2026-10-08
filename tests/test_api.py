@@ -26,7 +26,7 @@ PUBLIC_API = [
     "ValidationContext",
     "ValidationError",
     "Validator",
-    "WEBHOOK_CURSOR_FIELD",
+    "WINDOW_CURSOR_PATH",
     "cleanup_checkpoints",
     "detect_removal",
     "discover_sources",
