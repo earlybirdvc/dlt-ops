@@ -300,6 +300,15 @@ class TestCli:
         assert "orders_api" in result.output
         assert "events_api" not in result.output
 
+    def test_list_keeps_columns_aligned_for_a_long_declared_name(self, runner, make_project):
+        long_name = "@weekdays_0600_utc"  # longer than every built-in name
+        root = _project(make_project, {long_name: VALID_CRON}, orders_api=long_name, events_api="@daily")
+        result = runner.invoke(cli, ["--root", str(root), "pipeline", "list"])
+        assert result.exit_code == 0, result.output
+        rows = [line for line in result.output.splitlines() if line.startswith(("orders_api", "events_api"))]
+        assert len(rows) == 2
+        assert len({row.rindex(" ") for row in rows}) == 1  # the resource counts start in the same column
+
     def test_list_rejects_an_unknown_filter_with_the_declared_names(self, runner, make_project):
         root = _project(make_project, {"@daily0200": VALID_CRON}, orders_api="@daily0200")
         result = runner.invoke(cli, ["--root", str(root), "pipeline", "list", "--schedule", "@nope"])

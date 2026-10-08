@@ -105,21 +105,22 @@ def list_sources(ctx: click.Context, filter_schedule: str | None, output_json: b
     click.echo(click.style(f"Found {len(sources)} source(s)", fg="green", bold=True))
     click.echo()
 
-    # Header
-    click.echo(click.style(f"{'Name':<30} {'Pipeline':<15} {'Schedule':<10} {'Resources':<8}", bold=True))
-    click.echo(click.style("-" * 70, dim=True))
+    # Header. Declared schedule names can be longer than the built-in ones.
+    schedule_width = max([10, *(len(src.config.schedule) for src in sources.values() if src.config)])
+    header = f"{'Name':<30} {'Pipeline':<15} {'Schedule':<{schedule_width}} {'Resources':<8}"
+    click.echo(click.style(header, bold=True))
+    click.echo(click.style("-" * (60 + schedule_width), dim=True))
 
     for name in sorted(sources.keys()):
         src = sources[name]
-        schedule = src.config.schedule if src.config else click.style("-", fg="yellow")
         resource_count = len(src.resources)
 
         if src.config:
-            schedule_display = click.style(schedule, fg="green")
+            schedule_display = click.style(f"{src.config.schedule:<{schedule_width}}", fg="green")
         else:
-            schedule_display = click.style("-", fg="yellow")
+            schedule_display = click.style(f"{'-':<{schedule_width}}", fg="yellow")
 
-        click.echo(f"{name:<30} {src.pipeline_name:<15} {schedule_display:<19} {resource_count}")
+        click.echo(f"{name:<30} {src.pipeline_name:<15} {schedule_display} {resource_count}")
 
     click.echo()
     # The count is the import-free Phase-1 approximation: a resource shared under a pipeline's
