@@ -98,6 +98,20 @@ Make an HTTP error raise instead of loading an empty page. The `response_hook_ra
       show_root_heading: true
       heading_level: 3
 
+## Incremental loading helpers
+
+Read the run window inside a resource that dlt cannot filter by a cursor; see [reading the run window inside a resource](../concepts/scheduling-and-orchestration.md#reading-the-run-window-inside-a-resource).
+
+::: dlt_ops.WINDOW_CURSOR_PATH
+    options:
+      show_root_heading: true
+      heading_level: 3
+
+::: dlt_ops.resolve_incremental_window
+    options:
+      show_root_heading: true
+      heading_level: 3
+
 ## Destination adapters
 
 The contract a destination implements to reach full tier; see [destinations and capability tiers](../concepts/destinations-and-tiers.md) and the [adapter guide](../guides/write-a-destination-adapter.md).

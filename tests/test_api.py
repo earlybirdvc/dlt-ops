@@ -26,6 +26,7 @@ PUBLIC_API = [
     "ValidationContext",
     "ValidationError",
     "Validator",
+    "WINDOW_CURSOR_PATH",
     "cleanup_checkpoints",
     "detect_removal",
     "discover_sources",
@@ -36,6 +37,7 @@ PUBLIC_API = [
     "reconcile_all",
     "reconcile_source",
     "register",
+    "resolve_incremental_window",
     "validate_sources",
     "with_checkpoints",
 ]
@@ -87,7 +89,7 @@ class TestPublicApiSurface:
         code = "import json, sys, dlt_ops; print(json.dumps(sorted(sys.modules)))"
         proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
         loaded = json.loads(proc.stdout)
-        forbidden = ("airflow", "sentry_sdk", "google.cloud")
+        forbidden = ("airflow", "sentry_sdk", "google.cloud", "dlt_ops.orchestration", "dlt_ops.discovery.runner")
         offenders = [
             module for module in loaded if any(module == pkg or module.startswith(f"{pkg}.") for pkg in forbidden)
         ]
