@@ -1,11 +1,4 @@
-"""Run-window helpers: the ``WINDOW_CURSOR_PATH`` cursor under a
-frozen schema contract, ``resolve_incremental_window`` source precedence and
-lookback, and the runner end-to-end path with injected bounds.
-
-Everything runs in-process against DuckDB files in tmp_path (credential-free
-lane). The window unit tests pass ``SimpleNamespace`` stubs, since the helper
-reads only ``start_value`` and ``end_value``.
-"""
+"""Tests for the run-window helpers in ``dlt_ops.incremental``."""
 
 from __future__ import annotations
 
@@ -20,9 +13,9 @@ from dlt.pipeline.exceptions import PipelineStepFailed
 
 from dlt_ops import WINDOW_CURSOR_PATH, resolve_incremental_window
 from dlt_ops.discovery.runner import run_pipeline
+from dlt_ops.schema_contracts import CANONICAL_SCHEMA_CONTRACT
 from tests.test_runner import PROJECT_CONFIG, _query, _table_columns, make_source_info
 
-_FREEZE = {"tables": "evolve", "columns": "freeze", "data_type": "freeze"}
 _COLUMNS = {
     "id": {"data_type": "bigint", "nullable": False},
     "name": {"data_type": "text", "nullable": True},
@@ -35,7 +28,6 @@ _ROWS = [{"id": 1, "name": "a"}, {"id": 2, "name": None}, {"id": 3, "name": "c"}
 
 @pytest.fixture(autouse=True)
 def _isolate_run_env(tmp_path, monkeypatch):
-    """Keep dlt state + DuckDB files in tmp_path; no interval leaks in from the shell."""
     monkeypatch.setenv("DLT_DATA_DIR", str(tmp_path / "dlt-data"))
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("DLT_INTERVAL_START", raising=False)
@@ -43,10 +35,10 @@ def _isolate_run_env(tmp_path, monkeypatch):
 
 
 def _frozen_pipeline(name: str) -> Any:
-    """A DuckDB pipeline whose ``events`` table already exists under the freeze contract."""
+    """Create the table first: dlt lets the first load of a new table set its columns."""
     pipeline = dlt.pipeline(pipeline_name=name, destination="duckdb", dataset_name="analytics")
 
-    @dlt.resource(name="events", columns=_COLUMNS, schema_contract=_FREEZE)
+    @dlt.resource(name="events", columns=_COLUMNS, schema_contract=CANONICAL_SCHEMA_CONTRACT)
     def seed():
         yield [{"id": 0, "name": "seed"}]
 
@@ -55,7 +47,7 @@ def _frozen_pipeline(name: str) -> Any:
 
 
 def _cursor_resource(cursor_path: str):
-    @dlt.resource(name="events", columns=_COLUMNS, schema_contract=_FREEZE)
+    @dlt.resource(name="events", columns=_COLUMNS, schema_contract=CANONICAL_SCHEMA_CONTRACT)
     def events(
         cursor=dlt.sources.incremental(cursor_path, initial_value=_EPOCH, on_cursor_value_missing="include"),
     ):
@@ -99,8 +91,8 @@ class TestWindowCursor:
     def test_bare_cursor_name_fails_the_frozen_table(self):
         """Control: the bare name adds a column, which the freeze contract rejects.
 
-        If this stops failing on a future dlt, the JSONPath spelling of
-        ``WINDOW_CURSOR_PATH`` may no longer be needed.
+        If this test fails on a future dlt because the run no longer raises,
+        the JSONPath spelling of ``WINDOW_CURSOR_PATH`` may no longer be needed.
         """
         pipeline = _frozen_pipeline("bare_frozen")
         with pytest.raises(PipelineStepFailed, match=r"_window_cursor.*frozen"):
@@ -165,10 +157,22 @@ class TestResolveIncrementalWindow:
         window = resolve_incremental_window(_cursor(start_value=_EPOCH), None, "2024-03-01T00:00:00Z")
         assert window == (_EPOCH, None)
 
+    def test_string_cursor_bounds_are_parsed(self):
+        since, until = resolve_incremental_window(_cursor("2024-02-01T00:00:00Z", "2024-03-01T00:00:00Z"))
+        assert isinstance(since, dt.datetime)
+        assert isinstance(until, dt.datetime)
+        assert (since, until) == (_START, _END)
+
+    def test_lookback_moves_string_cursor_start(self):
+        window = resolve_incremental_window(_cursor("2024-02-01T00:00:00Z", "2024-03-01T00:00:00Z"), lookback_hours=2)
+        assert window == (_START - dt.timedelta(hours=2), _END)
+
+    def test_numeric_cursor_bound_is_rejected(self):
+        with pytest.raises(TypeError, match="start_value"):
+            resolve_incremental_window(_cursor(100, 200))
+
 
 def _window_source(name: str, windows: list[tuple[Any, Any]], lookback_hours: int):
-    """Source whose resource records the window it resolves; it declares no contract."""
-
     @dlt.resource(name="events")
     def events(
         cursor=dlt.sources.incremental(WINDOW_CURSOR_PATH, initial_value=_EPOCH, on_cursor_value_missing="include"),

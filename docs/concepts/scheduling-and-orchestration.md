@@ -78,6 +78,7 @@ An adapter is therefore thin by construction: it keeps only what is genuinely na
 
 ```python
 import dlt
+import pendulum
 from dlt_ops import WINDOW_CURSOR_PATH, resolve_incremental_window
 
 
@@ -85,17 +86,17 @@ from dlt_ops import WINDOW_CURSOR_PATH, resolve_incremental_window
 def events(
     cursor=dlt.sources.incremental(
         WINDOW_CURSOR_PATH,
-        initial_value="2024-01-01T00:00:00Z",
+        initial_value=pendulum.datetime(2024, 1, 1, tz="UTC"),
         on_cursor_value_missing="include",
     ),
 ):
-    since, until = resolve_incremental_window(cursor, None, None, lookback_hours=2)
+    since, until = resolve_incremental_window(cursor, lookback_hours=2)
     yield from fetch_events(after=since, before=until)
 ```
 
-**The cursor names a field that no row contains.** With `on_cursor_value_missing="include"`, dlt keeps every row, so the incremental filters nothing and only carries the window. `WINDOW_CURSOR_PATH` is a JSONPath, not a bare name, because dlt adds a bare cursor name to the table schema as a column. The canonical freeze contract that dlt-ops applies ([`schema_contract_declared`](../configuration/rules.md#schema_contract_declared)) then fails the run on that unknown column.
+**The cursor names a field that no row contains.** With `on_cursor_value_missing="include"`, dlt keeps every row, so the incremental filters nothing and only carries the window. This works for rows yielded as Python dicts. For Arrow tables and dataframes, dlt requires the cursor column to exist, so this pattern does not work for them. `WINDOW_CURSOR_PATH` is a JSONPath, not a bare name, because dlt adds a bare cursor name to the table schema as a column. Once the table exists, the canonical freeze contract that dlt-ops applies ([`schema_contract_declared`](../configuration/rules.md#schema_contract_declared)) rejects that column and fails the run.
 
-**`resolve_incremental_window` returns the `(since, until)` window to request.** It uses the first source that has a window: the injected interval, then the `incremental_start_value`/`incremental_end_value` config values (the second and third arguments), then the cursor's own start value. `until` is `None` when the window has no end.
+**Give `initial_value` as a datetime, not a string.** dlt joins the run interval only when the cursor holds datetimes. With a string `initial_value`, a run that has an interval fails with `JoinSchedulerError` before the resource starts.
 
 **Use `lookback_hours`, not dlt's `lag=`, to overlap runs.** Rows can arrive late. `lookback_hours` moves `since` earlier by that many hours, so each run reads the end of the previous window again. dlt's `lag=` cannot do this here, because it does not move `start_value` when an external interval is set. The overlap reads some rows twice, so give the resource a primary key and the `merge` write disposition.
 

@@ -9,9 +9,12 @@ import pendulum
 def parse_datetime(value: Any, field: str) -> datetime:
     """Parse an ISO-8601 datetime; ``field`` names the input in the error message.
 
+    A date without a time means midnight UTC. A time without a date uses the
+    current date.
+
     Raises:
-        ValueError: ``value`` is not an ISO-8601 datetime (a bare duration or
-            time of day is rejected too).
+        ValueError: ``value`` does not parse to a datetime, for example a
+            duration such as ``P1D``.
     """
     try:
         parsed = pendulum.parse(str(value))
