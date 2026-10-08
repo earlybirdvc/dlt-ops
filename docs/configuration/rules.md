@@ -71,7 +71,7 @@ Findings are errors unless tagged **warning** below. Every run renders both kind
 |---|---|---|---|
 | [`import_safety`](#import_safety) | core | Tier 1 | Source modules do no network I/O, disk writes, pipeline runs, or process spawns at import (disk reads OK); enforced in the Phase-2 sandbox. |
 | [`config_section_required`](#config_section_required) | core | Tier 1 | Every discovered source has a `[sources.<X>]` section in `.dlt/config.toml`. |
-| [`schedule_required`](#schedule_required) | core | Tier 1 | Every source declares a valid `schedule` (`@hourly` … `@manual`). |
+| [`schedule_required`](#schedule_required) | core | Tier 1 | Every source declares a valid `schedule` (a built-in `@hourly` … `@manual`, or a name declared in `[dlt_ops.schedules]`). |
 | [`explicit_source_name`](#explicit_source_name) | core | Tier 1 | `@dlt.source(name="<X>")` names its section explicitly. |
 | [`module_name_matches_section`](#module_name_matches_section) | core | Tier 1 | Source module filename equals its config section (`source/<X>.py` ↔ `[sources.<X>]`). |
 | [`orphan_config_sections`](#orphan_config_sections) | core | Tier 1 · warning | A `[sources.<X>]` section with no matching discovered source is flagged. |
@@ -129,7 +129,7 @@ All three ride this path rather than the rule framework for the same reason: a r
 
 *Tier 1 (`validate`).*
 
-**Every source declares `schedule` under `[sources.<X>.dlt_ops]`, and its value is one of `@hourly`, `@2hourly`, `@daily`, `@weekly`, `@monthly`, `@manual`.** The schedule is what orchestrator adapters build DAGs from.
+**Every source declares `schedule` under `[sources.<X>.dlt_ops]`, and its value is a built-in name (`@hourly`, `@2hourly`, `@daily`, `@weekly`, `@monthly`, `@manual`) or a name declared in [`[dlt_ops.schedules]`](reference.md#dlt_opsschedules).** The schedule is what orchestrator adapters build DAGs from.
 
 ### `explicit_source_name`
 
@@ -251,7 +251,7 @@ incremental_cursor_required = true
 
 Three details govern what it flags:
 
-- **Scoped to recurring schedules.** The harm is a full refresh repeating on a cadence, so `@manual` sources and sources with no parsed config are out of scope.
+- **Scoped to recurring schedules.** The harm is a full refresh repeating on a cadence, so every schedule except `@manual` counts as recurring, declared schedules included. `@manual` sources and sources with no parsed config are out of scope.
 - **It reads the live resource, not the source text.** `apply_hints(incremental=...)` and factory-built cursors are invisible to an AST scan, and a false "no cursor" would be worse than the gap it closes. That means the rule needs the source to import — a source excluded from Phase 2 is reported by `validation_coverage` instead.
 - **Error, not warning, when it is on.** A warning never fails a run outside `--strict`, so a project that deliberately switched this rule on would buy visibility and no gate.
 

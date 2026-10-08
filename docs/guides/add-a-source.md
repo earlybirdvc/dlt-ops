@@ -138,7 +138,7 @@ schedule = "@daily"
 dataset = "shop_raw"
 ```
 
-`schedule` takes one of `@hourly`, `@2hourly`, `@daily`, `@weekly`, `@monthly`, `@manual` — it is metadata the orchestrator adapters compile into DAGs, not a scheduler inside `dlt-ops` ([scheduling](../concepts/scheduling-and-orchestration.md)). `dataset` scopes this source's tables; without it the source needs a project-wide `[dlt_ops].default_dataset`. Validate again:
+`schedule` takes one of `@hourly`, `@2hourly`, `@daily`, `@weekly`, `@monthly`, `@manual`, or a name the project declares in `[dlt_ops.schedules]` — it is metadata the orchestrator adapters compile into DAGs, not a scheduler inside `dlt-ops` ([scheduling](../concepts/scheduling-and-orchestration.md)). `dataset` scopes this source's tables; without it the source needs a project-wide `[dlt_ops].default_dataset`. Validate again:
 
 ```text
 Validating sources
