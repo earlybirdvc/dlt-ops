@@ -10,11 +10,11 @@ description: How dlt-ops handles scheduling without being an orchestrator — ev
 
 | What it is | What owns scheduling | The schedule contract | Orchestrator adapters | Canonical detail |
 |---|---|---|---|---|
-| Schedule metadata plus the orchestrator-neutral machinery around a scheduler — `dlt-ops` runs no scheduler loop itself | The orchestrator (Airflow first); core owns discovery, schedule tags, and window/selection decisions as plain data | Every source declares one `schedule` tag from a closed set (below), enforced by the `schedule_required` rule | Translate discovery output into native objects — one DAG per tag; ship on the `[airflow]` extra | [Airflow guide](../guides/airflow.md); [deployment](../guides/deployment.md) |
+| Schedule metadata plus the orchestrator-neutral machinery around a scheduler — `dlt-ops` runs no scheduler loop itself | The orchestrator (Airflow first); core owns discovery, schedule tags, and window/selection decisions as plain data | Every source declares one `schedule` tag — a built-in name or one the project declares (below) — enforced by the `schedule_required` rule | Translate discovery output into native objects — one DAG per tag; ship on the `[airflow]` extra | [Airflow guide](../guides/airflow.md); [deployment](../guides/deployment.md) |
 
 ## The `schedule` key
 
-**Every source must declare a `schedule` under its `[sources.<X>.dlt_ops]` table** — it is one of the nine [layout conventions](../getting-started/project-layout.md), enforced by the `schedule_required` rule. The value comes from a closed set:
+**Every source must declare a `schedule` under its `[sources.<X>.dlt_ops]` table** — it is one of the nine [layout conventions](../getting-started/project-layout.md), enforced by the `schedule_required` rule. The value is one of the built-in names below, or a name the project declares itself ([declared schedules](#declared-schedules)):
 
 | Value | Meaning |
 |---|---|
@@ -25,7 +25,7 @@ description: How dlt-ops handles scheduling without being an orchestrator — ev
 | `@monthly` | Every month |
 | `@manual` | Never scheduled; runs only when explicitly triggered |
 
-`validate` rejects both a missing key and a value outside the set:
+`validate` rejects both a missing key and a name that is neither built-in nor declared:
 
 ```text
 ✗ 1 error(s):
@@ -34,10 +34,14 @@ description: How dlt-ops handles scheduling without being an orchestrator — ev
 
 ```text
 ✗ 1 error(s):
-  [web_events] schedule: Invalid schedule '@fortnightly'. Valid: ['@hourly', '@2hourly', '@daily', '@weekly', '@monthly', '@manual']
+  [web_events] schedule: Invalid schedule '@fortnightly'. Valid: ['@hourly', '@2hourly', '@daily', '@weekly', '@monthly', '@manual', '@daily0200']
 ```
 
-The set is deliberately coarse — tags, not cron strings. A schedule value is a **grouping key**: every source sharing a tag runs together (one DAG per tag under Airflow), and the adapter owns turning the tag into the orchestrator's native scheduling syntax. Cron-precision scheduling in project config would push orchestrator policy into every project and fragment sources into one-off groups; the closed set covers the cadences of the moderate-volume scheduled batch ingestion this package targets, and `@manual` covers everything event-shaped. `pipeline list` shows the resolved tag per source — here the scaffolded demo project (`dlt-ops init demo --example`) plus the `@manual` source the [backfill](backfill.md) page adds to it:
+The list shows the built-in names first, then the declared names in sorted order (here the project declares `@daily0200`).
+
+Schedules are named tags, not per-source cron strings. A schedule value is a **grouping key**: every source sharing a tag runs together (one DAG per tag under Airflow), and the adapter owns turning the tag into the orchestrator's native scheduling syntax. A cron string on each source would split sources into one-off groups, so a source never carries its own cron. The built-in tags cover the usual cadences of moderate-volume scheduled batch ingestion, and `@manual` covers everything event-shaped.
+
+`pipeline list` shows the resolved tag per source, and `pipeline list --schedule <name>` filters by a built-in or a declared name. Here is the scaffolded demo project (`dlt-ops init demo --example`) plus the `@manual` source the [backfill](backfill.md) page adds to it:
 
 ```text
 Found 2 source(s)
@@ -48,18 +52,32 @@ demo_events                    my_pipeline     @daily     1
 web_events                     web             @manual    1
 ```
 
+### Declared schedules
+
+**When a project needs a time that no built-in tag gives, it declares a named schedule in `[dlt_ops.schedules]`, and sources pick it by name:**
+
+```toml
+[dlt_ops.schedules]
+"@daily0200" = "0 2 * * *"
+
+[sources.vendor_api.dlt_ops]
+schedule = "@daily0200"
+```
+
+A declared schedule is still a grouping key: every source that names `@daily0200` runs in the same group, and the Airflow adapter builds one DAG for it (`dlt_daily0200`) that runs on its cron. The name and cron rules, and the timezone the cron runs in, are in the [config reference](../configuration/reference.md#dlt_opsschedules).
+
 ## The core orchestrator interface
 
 **Everything an orchestrator needs that is *not* orchestrator-specific lives in `dlt_ops.orchestration`, importable without any orchestrator installed:**
 
-- **`scheduled_sources(project_root)`** groups Phase-1 sources by `Schedule`. It is pure AST — it never imports project code, so an adapter may call it where project code must never execute: DAG-parse time. Sources with no (or invalid) config group under `@manual` rather than disappearing. Against the same two-source demo project:
+- **`scheduled_sources(project_root)`** groups Phase-1 sources by schedule name, built-in and declared. It is pure AST — it never imports project code, so an adapter may call it where project code must never execute: DAG-parse time. Sources with no (or invalid) config group under `@manual` rather than disappearing. Against the same two-source demo project:
 
     ```python
     from pathlib import Path
     from dlt_ops.orchestration import scheduled_sources
 
     for schedule, sources in scheduled_sources(Path(".")).items():
-        print(schedule.value, [s.name for s in sources])
+        print(schedule, [s.name for s in sources])
     ```
 
     ```text
@@ -70,7 +88,7 @@ web_events                     web             @manual    1
 - **`filtering_decision(...)`** and **`resolve_window(...)`** compute the manual-trigger *decisions* as plain data: should this (source, resource) unit run under a trigger's selection, and what `[start, end)` window applies — explicit overrides outranking the orchestrator's native interval, a partial override replacing just its edge. Adapters map the verdicts onto native mechanics (a skip exception, a data interval) but never re-implement the logic.
 - **`run_source(...)`** is the run entry: Phase-2 introspection of the one named source, secrets through the [secret-backend axis](plugins.md), then the same shared runner the CLI uses — Tier-2 preflight, the runs ledger, trace persistence, and window injection via `TimeIntervalContext` all live in the runner, not per adapter.
 
-An adapter is therefore thin by construction: it keeps only what is genuinely native — task shapes, skip exceptions, its own data intervals, and the materialization of `Schedule` tags into its scheduling syntax.
+An adapter is therefore thin by construction: it keeps only what is genuinely native — task shapes, skip exceptions, its own data intervals, and the materialization of schedule tags into its scheduling syntax.
 
 ## The Airflow adapter
 
@@ -106,7 +124,7 @@ Inside each DAG, every source becomes a task group (dlt's own `PipelineTasksGrou
 
 The project root does not have to sit inside the dags folder. `PipelineTasksGroup` repoints dlt's own config/secrets resolution at the dags folder while it constructs itself, and the factory restores the project root through the exported `pin_dlt_project_dir` helper — custom DAG factories call it for the same reason ([Airflow guide](../guides/airflow.md#writing-your-own-dag-factory)). Keeping the project next to the DAG file is still the simplest deployment, because the two then travel together through whatever ships the dags folder. Per-environment deployments are config, not code — point prod and staging at their own project roots, each with a `config.toml` naming the right destination and dataset.
 
-Two schedule tags materialize as explicit cron, fixed by design with no config knob: `@2hourly` becomes `0 */2 * * *` (Airflow has no such preset), and `@weekly` becomes `0 0 * * 1` — Monday 00:00 UTC, not Airflow's Sunday preset, because a scheduler fires when the interval closes and Monday is what closes the ISO week. The Monday pin is intentional, not a bug.
+The cron of each built-in tag is fixed by design and has no config setting. Two built-in tags materialize as explicit cron: `@2hourly` becomes `0 */2 * * *` (Airflow has no such preset), and `@weekly` becomes `0 0 * * 1` — Monday 00:00 UTC, not Airflow's Sunday preset, because a scheduler fires when the interval closes and Monday is what closes the ISO week. The Monday pin is intentional, not a bug. `@hourly`, `@daily` and `@monthly` pass through as Airflow presets.
 
 ### Parse purity
 

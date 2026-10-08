@@ -12,7 +12,6 @@ import pendulum
 import pytest
 
 from dlt_ops import orchestration
-from dlt_ops.discovery import Schedule
 from dlt_ops.discovery.phase2 import SOURCE_MODULE_NAMESPACE
 from dlt_ops.orchestration import RunDecision, filtering_decision, resolve_window, run_source, scheduled_sources
 
@@ -89,10 +88,10 @@ class TestScheduledSources:
     def test_groups_by_schedule_with_manual_fallback(self, project):
         groups = scheduled_sources(project)
 
-        assert {s.name for s in groups[Schedule.DAILY]} == {"web_events"}
-        assert {s.name for s in groups[Schedule.TWO_HOURLY]} == {"orders_api"}
+        assert {s.name for s in groups["@daily"]} == {"web_events"}
+        assert {s.name for s in groups["@2hourly"]} == {"orders_api"}
         # canary_api has no config section -> MANUAL
-        assert {s.name for s in groups[Schedule.MANUAL]} == {"canary_api"}
+        assert {s.name for s in groups["@manual"]} == {"canary_api"}
 
     def test_grouping_is_phase1_only(self, project):
         """Parse-time safety: grouping never imports project code."""
@@ -103,7 +102,7 @@ class TestScheduledSources:
 
     def test_static_resources_present(self, project):
         groups = scheduled_sources(project)
-        (web_events,) = groups[Schedule.DAILY]
+        (web_events,) = groups["@daily"]
         assert web_events.resources == ("page_views", "sessions")
 
 

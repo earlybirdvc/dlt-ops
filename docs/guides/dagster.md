@@ -31,7 +31,7 @@ from pathlib import Path
 from dlt_ops import discover_sources
 
 for name, info in discover_sources(Path(".")).items():
-    print(name, info.config.schedule.value)
+    print(name, info.config.schedule)
 ```
 
 ```text
@@ -43,13 +43,14 @@ That mapping is the input to everything below: the source names become asset key
 
 ## One asset per source, subprocessing the CLI
 
-**The recommended recipe builds one Dagster asset per source, each subprocessing `dlt-ops pipeline run -s <name> -y`.** Because the run goes through the CLI, it goes through the same dlt-ops runner as everything else — the runs ledger, pre-load assertions, and checkpoint resume all stay in force. A per-source `AutomationCondition.on_cron` gives each asset its own cadence, mapped from the `schedule` tag:
+**The recommended recipe builds one Dagster asset per source, each subprocessing `dlt-ops pipeline run -s <name> -y`.** Because the run goes through the CLI, it goes through the same dlt-ops runner as everything else — the runs ledger, pre-load assertions, and checkpoint resume all stay in force. A per-source `AutomationCondition.on_cron` gives each asset its own cadence, mapped from the `schedule` tag. You own the cron of each built-in tag; a [declared schedule](../concepts/scheduling-and-orchestration.md#declared-schedules) brings its cron from `[dlt_ops.schedules]` in `.dlt/config.toml`:
 
 Backfill is the exception, and it is a different command. `pipeline run` takes no window flags; a bounded, chunked, resumable window is `dlt-ops pipeline backfill --from --to --chunk`, so a Dagster partition that must re-ingest a specific window subprocesses that verb instead. See the [backfill guide](backfill.md).
 
 ```python title="dagster_defs.py"
 # at (or beside) your dlt-ops project root
 import subprocess
+import tomllib
 from pathlib import Path
 
 import dagster as dg
@@ -58,7 +59,7 @@ from dlt_ops import discover_sources
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
-# You own the preset -> cron mapping; dlt-ops keeps schedule tags coarse.
+# You own the cron of each built-in tag.
 TAG_TO_CRON = {
     "@hourly": "0 * * * *",
     "@2hourly": "0 */2 * * *",
@@ -66,6 +67,14 @@ TAG_TO_CRON = {
     "@weekly": "0 0 * * 1",
     "@monthly": "0 0 1 * *",
 }
+
+# A declared schedule brings its own cron from [dlt_ops.schedules].
+with (PROJECT_ROOT / ".dlt" / "config.toml").open("rb") as config_file:
+    DECLARED = tomllib.load(config_file).get("dlt_ops", {}).get("schedules", {})
+
+
+def cron_for(tag: str) -> str:
+    return DECLARED.get(tag) or TAG_TO_CRON[tag]
 
 
 def source_asset(name: str, cron: str) -> dg.AssetsDefinition:
@@ -85,9 +94,9 @@ def source_asset(name: str, cron: str) -> dg.AssetsDefinition:
 
 
 assets = [
-    source_asset(name, TAG_TO_CRON[info.config.schedule.value])
+    source_asset(name, cron_for(info.config.schedule))
     for name, info in discover_sources(PROJECT_ROOT).items()
-    if info.config and info.config.schedule.value != "@manual"
+    if info.config and info.config.schedule != "@manual"
 ]
 ```
 

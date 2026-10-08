@@ -24,7 +24,7 @@ from typing import Any
 import pydantic
 import pytest
 
-from dlt_ops import Schedule, SourceConfig, SourceInfo
+from dlt_ops import SourceConfig, SourceInfo
 from dlt_ops._pipeline_names import DEFAULT_PIPELINE_NAME_TEMPLATE
 from dlt_ops.config import ProjectConfig
 from dlt_ops.destinations import ColumnInfo
@@ -127,7 +127,7 @@ def _make_source(
     if naming is not None:
         fake_instance.schema = types.SimpleNamespace(naming=naming)
     config = SourceConfig(
-        schedule=Schedule.HOURLY,
+        schedule="@hourly",
         injected_columns=injected_columns,
     )
     return SourceInfo(
@@ -551,7 +551,7 @@ class TestAdditiveDetection:
             source_fn=_boom,
             resources=("res_a", "res_b"),
             module_stem="orders_api",
-            config=SourceConfig(schedule=Schedule.HOURLY, injected_columns=("region_id",)),
+            config=SourceConfig(schedule="@hourly", injected_columns=("region_id",)),
         )
         fetcher = FakeSchemaFetcher({"res_a": _cols("id"), "res_b": _cols("id")})
         sink = RecordingSink()

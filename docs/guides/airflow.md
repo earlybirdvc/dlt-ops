@@ -99,7 +99,7 @@ from pathlib import Path
 from dlt_ops.orchestration import scheduled_sources
 
 for schedule, sources in scheduled_sources(Path(".")).items():
-    print(schedule.value, [s.name for s in sources])
+    print(schedule, [s.name for s in sources])
 ```
 
 ```text
@@ -111,7 +111,8 @@ So this project materializes as two DAGs, `dlt_hourly` and `dlt_daily` — ids a
 
 - Inside each DAG, every source becomes a task group keyed by its config section, with one task per Phase-1 static resource, task id `{source}.{source}_{resource}` — here `github_events_api.github_events_api_events`, and so on. A source whose resources only materialize dynamically gets a single whole-source task.
 - `@manual` sources build a trigger-only DAG (`schedule=None`).
-- Two tags materialize as explicit cron, fixed with no config knob: `@2hourly` becomes `0 */2 * * *`, and `@weekly` becomes `0 0 * * 1` — Monday 00:00 UTC, intentionally, because Monday is what closes the ISO week (Airflow's Sunday preset would fire with the week's own Sunday uncaptured).
+- The cron of each built-in tag is fixed and has no config setting. Two built-in tags materialize as explicit cron: `@2hourly` becomes `0 */2 * * *`, and `@weekly` becomes `0 0 * * 1` — Monday 00:00 UTC, intentionally, because Monday is what closes the ISO week (Airflow's Sunday preset would fire with the week's own Sunday uncaptured). `@hourly`, `@daily` and `@monthly` pass through as Airflow presets.
+- A [declared schedule](../concepts/scheduling-and-orchestration.md#declared-schedules) builds its own DAG with its declared cron: `"@daily0200" = "0 2 * * *"` becomes DAG `dlt_daily0200` with schedule `0 2 * * *`. The [config reference](../configuration/reference.md#dlt_opsschedules) states which timezone the cron runs in.
 - `catchup` defaults to off; missed windows are re-runnable through the manual-trigger conf instead.
 
 The factory takes `dag_prefix`, `start_date`, `catchup`, and `dag_kwargs` (extra keyword arguments — tags, `default_args` — applied to every `DAG(...)`) for fleet-wide policy, and `cleanup_data_dir` / `cleanup_after_days` to append a worker-hygiene task: dlt's `PipelineTasksGroup` provisions a fresh `dlt_*` scratch directory per parse, stale ones bloat worker storage, and the appended `cleanup_old_dlt_files` task sweeps entries older than the threshold (default 3 days) after the pipeline groups finish.

@@ -20,7 +20,7 @@ import duckdb
 import pytest
 
 from dlt_ops.config import ProjectConfigError, UnresolvedDestinationError
-from dlt_ops.discovery.models import Schedule, SourceConfig, ValidationContext
+from dlt_ops.discovery.models import SourceConfig, ValidationContext
 from dlt_ops.discovery.runner import run_pipeline
 from dlt_ops.discovery.validators import CORE_RULES
 from dlt_ops.discovery.validators.staleness import validate_stale_sources
@@ -367,7 +367,7 @@ class TestSetupFailuresAreRecorded:
 
 
 def _staleness_ctx(root: Path, name: str = "web_events") -> ValidationContext:
-    info = make_source_info(name, simple_rows_source, config=SourceConfig(schedule=Schedule.DAILY))
+    info = make_source_info(name, simple_rows_source, config=SourceConfig(schedule="@daily"))
     return ValidationContext(sources={name: info}, config={}, project_root=root)
 
 

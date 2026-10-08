@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import click
 
+from dlt_ops._schedules import resolve_schedule
 from dlt_ops.cli._common import _discover_with_progress, _with_progress, resolve_cli_project_root
 from dlt_ops.cli.backfill import backfill
 from dlt_ops.cli.status import status
@@ -15,12 +16,14 @@ from dlt_ops.config import (
     ProjectConfigError,
     UnresolvedDatasetError,
     UnresolvedDestinationError,
+    load_declared_schedules,
     load_project_config,
+    load_raw_config,
     resolve_dataset,
     resolve_destination,
 )
 from dlt_ops.destinations import ADAPTER_GATED_FEATURES, UnregisteredDestinationError, has_adapter
-from dlt_ops.discovery import Schedule, discover, validate_sources
+from dlt_ops.discovery import discover, validate_sources
 from dlt_ops.discovery.runner import run_pipeline
 from dlt_ops.discovery.validator import check_unknown_rule_ids, load_rule_specs, resolve_rules
 
@@ -40,7 +43,12 @@ def pipeline(ctx: click.Context) -> None:
 
 
 @pipeline.command("list")
-@click.option("--schedule", "-s", "filter_schedule", help="Filter by schedule (@hourly, @daily, etc.)")
+@click.option(
+    "--schedule",
+    "-s",
+    "filter_schedule",
+    help="Filter by schedule (built-in such as @daily, or a name from [dlt_ops.schedules])",
+)
 @click.option("--json", "output_json", is_flag=True, help="Output as JSON")
 @click.pass_context
 def list_sources(ctx: click.Context, filter_schedule: str | None, output_json: bool) -> None:
@@ -58,6 +66,16 @@ def list_sources(ctx: click.Context, filter_schedule: str | None, output_json: b
     project_root = resolve_cli_project_root(ctx)
     sources = discover(project_root) if output_json else _discover_with_progress(project_root, discover)
 
+    if filter_schedule:
+        try:
+            declared = load_declared_schedules(load_raw_config(project_root))
+            target_schedule = resolve_schedule(filter_schedule, declared)
+        except ValueError as e:
+            click.echo(click.style(f"Error: {e}", fg="red"), err=True)
+            sys.exit(1)
+
+        sources = {name: src for name, src in sources.items() if src.config and src.config.schedule == target_schedule}
+
     # --json first: an empty project is `[]`, not the human "No sources found"
     # banner that a consumer piping to a parser cannot read.
     if output_json:
@@ -69,7 +87,7 @@ def list_sources(ctx: click.Context, filter_schedule: str | None, output_json: b
                 "pipeline": src.pipeline_name,
                 "function": src.function_name,
                 "config_section": src.config_section,
-                "schedule": src.config.schedule.value if src.config else None,
+                "schedule": src.config.schedule if src.config else None,
                 "airflow_var": src.config.airflow_var if src.config else None,
                 "resources": list(src.resources),
             }
@@ -82,35 +100,25 @@ def list_sources(ctx: click.Context, filter_schedule: str | None, output_json: b
         click.echo(click.style("No sources found", fg="yellow"))
         return
 
-    # Filter by schedule if specified
-    if filter_schedule:
-        try:
-            target_schedule = Schedule.from_string(filter_schedule)
-        except ValueError as e:
-            click.echo(click.style(f"Error: {e}", fg="red"))
-            sys.exit(1)
-
-        sources = {name: src for name, src in sources.items() if src.config and src.config.schedule == target_schedule}
-
     click.echo()
     click.echo(click.style(f"Found {len(sources)} source(s)", fg="green", bold=True))
     click.echo()
 
-    # Header
-    click.echo(click.style(f"{'Name':<30} {'Pipeline':<15} {'Schedule':<10} {'Resources':<8}", bold=True))
-    click.echo(click.style("-" * 70, dim=True))
+    schedule_width = max([10, *(len(src.config.schedule) for src in sources.values() if src.config)])
+    header = f"{'Name':<30} {'Pipeline':<15} {'Schedule':<{schedule_width}} {'Resources':<8}"
+    click.echo(click.style(header, bold=True))
+    click.echo(click.style("-" * (60 + schedule_width), dim=True))
 
     for name in sorted(sources.keys()):
         src = sources[name]
-        schedule = src.config.schedule.value if src.config else click.style("-", fg="yellow")
         resource_count = len(src.resources)
 
         if src.config:
-            schedule_display = click.style(schedule, fg="green")
+            schedule_display = click.style(f"{src.config.schedule:<{schedule_width}}", fg="green")
         else:
-            schedule_display = click.style("-", fg="yellow")
+            schedule_display = click.style(f"{'-':<{schedule_width}}", fg="yellow")
 
-        click.echo(f"{name:<30} {src.pipeline_name:<15} {schedule_display:<19} {resource_count}")
+        click.echo(f"{name:<30} {src.pipeline_name:<15} {schedule_display} {resource_count}")
 
     click.echo()
     # The count is the import-free Phase-1 approximation: a resource shared under a pipeline's
@@ -168,7 +176,7 @@ def resources(ctx: click.Context, source_name: str | None, output_json: bool) ->
 
         for i, name in enumerate(source_names, 1):
             src = sources[name]
-            schedule = src.config.schedule.value if src.config else "-"
+            schedule = src.config.schedule if src.config else "-"
             click.echo(f"  {click.style(str(i), fg='cyan')}. {name} ({schedule}, {len(src.resources)} resources)")
 
         click.echo()
@@ -197,7 +205,7 @@ def resources(ctx: click.Context, source_name: str | None, output_json: bool) ->
     click.echo(click.style("Config: ", dim=True) + f"[sources.{src.config_section}]")
 
     if src.config:
-        click.echo(click.style("Schedule: ", dim=True) + click.style(src.config.schedule.value, fg="green"))
+        click.echo(click.style("Schedule: ", dim=True) + click.style(src.config.schedule, fg="green"))
         if src.config.airflow_var:
             click.echo(click.style("Airflow Variable: ", dim=True) + src.config.airflow_var)
     click.echo()
@@ -265,7 +273,7 @@ def run(
 
         for i, name in enumerate(source_names, 1):
             src = sources[name]
-            schedule = src.config.schedule.value if src.config else "-"
+            schedule = src.config.schedule if src.config else "-"
             click.echo(f"  {click.style(str(i), fg='cyan')}. {name} ({schedule}, {len(src.resources)} resources)")
 
         click.echo()

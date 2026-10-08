@@ -161,6 +161,7 @@ def test_get_source_schedules_integration(demo_project_cwd):
     assert len(schedules) > 0, "No configured sources found"
     for name, sched in schedules.items():
         assert sched in valid_schedules, f"{name} has invalid schedule: {sched}"
+        assert type(sched) is str
 
 
 @pytest.mark.integration

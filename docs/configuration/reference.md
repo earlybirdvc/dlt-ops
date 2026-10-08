@@ -62,6 +62,24 @@ alert_sinks = ["logging", "sentry"]
 environment = "prod"
 ```
 
+### `[dlt_ops.schedules]`
+
+**Named schedules that the project adds to the built-in ones.** Each entry maps a name to a cron expression. A source uses a declared name in its `schedule` key, the same way it uses a built-in name. The keys must be quoted in TOML, because they start with `@`.
+
+```toml
+[dlt_ops.schedules]
+"@daily0200" = "0 2 * * *"
+
+[sources.vendor_api.dlt_ops]
+schedule = "@daily0200"
+```
+
+- **Name.** The whole name must match `@[A-Za-z0-9_.-]+`: `@` followed by letters, digits, `_`, `.` or `-`. The name without `@` becomes part of an orchestrator job id, for example the Airflow DAG id `dlt_daily0200`. A name cannot be a built-in name (`@hourly`, `@2hourly`, `@daily`, `@weekly`, `@monthly`, `@manual`), so the built-in schedules cannot be redefined.
+- **Cron expression.** A string with exactly five fields: minute, hour, day of month, month, day of week. Month and day names such as `MAR` and `FRI` are accepted. Presets such as `@daily`, forms with six or seven fields (seconds or year), and croniter's random `R` field are rejected. The expression must also pass croniter's strict check, which rejects out-of-range values, a step of `0`, and dates that never happen, such as February 30.
+- **Timezone.** A cron expression has no timezone of its own, so each orchestrator decides which timezone it runs in. Airflow runs it in the timezone of the DAG's `start_date`. The DAG factory's default `start_date` is 2024-01-01 in UTC, so by default the cron runs in UTC.
+
+An invalid entry is a `ProjectConfigError` raised when the project config loads. Its message starts with `[dlt_ops.schedules]:` and names the entry. Every `dlt-ops pipeline` command prints it as `Error: [dlt_ops.schedules]: ...` and exits 1, and the Airflow DAG factory and discovery raise it.
+
 ### Unknown keys
 
 **Any other top-level key under `[dlt_ops]` is collected as unknown (a probable typo) and ignored by the parsers.** `validate` surfaces the collected names as typo warnings; nothing is raised at load time.
@@ -72,7 +90,7 @@ environment = "prod"
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `schedule` | string | — (**required**) | One of `@hourly`, `@2hourly`, `@daily`, `@weekly`, `@monthly`, `@manual`. Missing or invalid values fail the `schedule_required` rule, and the source is treated as having no valid config (grouped under `@manual` by scheduling helpers). |
+| `schedule` | string | — (**required**) | A built-in name (`@hourly`, `@2hourly`, `@daily`, `@weekly`, `@monthly`, `@manual`) or a name declared in [`[dlt_ops.schedules]`](#dlt_opsschedules). Missing or unknown values fail the `schedule_required` rule. Discovery logs a warning for an unknown name, and the source is treated as having no valid config (grouped under `@manual` by scheduling helpers, so it runs only on demand). |
 | `destination` | string | unset | Per-source destination override. Wins over `[dlt_ops].default_destination`. |
 | `dataset` | string | unset | Per-source dataset override. Wins over `[dlt_ops].default_dataset`; an explicit `--dataset` on `run` / `clean` wins over both. |
 | `airflow_var` | string | unset | Airflow Variable name holding this source's secrets. Setting it is what makes the Airflow secret backend claim the source (the key is owned by the `[airflow]` extra's plugin; core parses it but never reads it for its own behavior). With the Airflow plugin active, the `airflow_var_required` rule demands it for any source whose signature uses `dlt.secrets.value`. |

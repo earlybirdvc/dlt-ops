@@ -15,7 +15,7 @@ from dlt_ops.config import (
     resolve_destination,
 )
 from dlt_ops._pipeline_names import DEFAULT_PIPELINE_NAME_TEMPLATE
-from dlt_ops.discovery.models import Schedule, SourceConfig
+from dlt_ops.discovery.models import SourceConfig
 from dlt_ops.plugins import registry as registry_mod
 
 
@@ -261,12 +261,12 @@ class TestPipelineNameTemplate:
 
 class TestDestinationResolution:
     def test_source_override_beats_project_default(self):
-        source = SourceConfig(schedule=Schedule.DAILY, destination="duckdb")
+        source = SourceConfig(schedule="@daily", destination="duckdb")
         project = ProjectConfig(default_destination="postgres")
         assert resolve_destination(source, project) == "duckdb"
 
     def test_project_default_when_no_override(self):
-        source = SourceConfig(schedule=Schedule.DAILY)
+        source = SourceConfig(schedule="@daily")
         project = ProjectConfig(default_destination="postgres")
         assert resolve_destination(source, project) == "postgres"
 
@@ -276,25 +276,25 @@ class TestDestinationResolution:
 
     def test_unresolved_names_both_config_keys(self):
         with pytest.raises(UnresolvedDestinationError) as exc:
-            resolve_destination(SourceConfig(schedule=Schedule.DAILY), ProjectConfig())
+            resolve_destination(SourceConfig(schedule="@daily"), ProjectConfig())
         message = str(exc.value)
         assert "[dlt_ops].default_destination" in message
         assert "[sources.<section>.dlt_ops].destination" in message
 
     def test_empty_string_override_falls_through(self):
-        source = SourceConfig(schedule=Schedule.DAILY, destination="")
+        source = SourceConfig(schedule="@daily", destination="")
         project = ProjectConfig(default_destination="postgres")
         assert resolve_destination(source, project) == "postgres"
 
 
 class TestDatasetResolution:
     def test_source_override_beats_project_default(self):
-        source = SourceConfig(schedule=Schedule.DAILY, dataset="scratch")
+        source = SourceConfig(schedule="@daily", dataset="scratch")
         project = ProjectConfig(default_dataset="raw_data")
         assert resolve_dataset(source, project) == "scratch"
 
     def test_project_default_when_no_override(self):
-        source = SourceConfig(schedule=Schedule.DAILY)
+        source = SourceConfig(schedule="@daily")
         project = ProjectConfig(default_dataset="raw_data")
         assert resolve_dataset(source, project) == "raw_data"
 
@@ -304,7 +304,7 @@ class TestDatasetResolution:
 
     def test_unresolved_names_both_config_keys(self):
         with pytest.raises(UnresolvedDatasetError) as exc:
-            resolve_dataset(SourceConfig(schedule=Schedule.DAILY), ProjectConfig())
+            resolve_dataset(SourceConfig(schedule="@daily"), ProjectConfig())
         message = str(exc.value)
         assert "[dlt_ops].default_dataset" in message
         assert "[sources.<section>.dlt_ops].dataset" in message

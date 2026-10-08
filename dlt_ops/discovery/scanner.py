@@ -47,17 +47,17 @@ def discover_sources(project_root: Path) -> dict[str, SourceInfo]:
     return sources
 
 
-def get_sources_by_schedule(sources: dict[str, SourceInfo]) -> dict[Schedule, list[SourceInfo]]:
-    """Group sources by their schedule.
+def get_sources_by_schedule(sources: dict[str, SourceInfo]) -> dict[str, list[SourceInfo]]:
+    """Group sources by their schedule name.
 
-    Sources without valid config are placed under Schedule.MANUAL.
+    Sources without valid config are placed under ``"@manual"``.
     """
-    by_schedule: dict[Schedule, list[SourceInfo]] = defaultdict(list)
+    by_schedule: dict[str, list[SourceInfo]] = defaultdict(list)
 
     for source in sources.values():
         if source.config:
             by_schedule[source.config.schedule].append(source)
         else:
-            by_schedule[Schedule.MANUAL].append(source)
+            by_schedule[Schedule.MANUAL.value].append(source)
 
     return dict(by_schedule)

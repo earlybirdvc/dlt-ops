@@ -106,7 +106,7 @@ The module keeps the naming chain the layout enforces — module stem `github_ap
 | `pipeline_name=` | Derived from the source section. `<source>_pipeline` by default; `[dlt_ops].pipeline_name_template` changes the shape project-wide (`"{source}"` keeps the bare section name) |
 | `destination=` | `[dlt_ops].default_destination`, or `[sources.<name>.dlt_ops].destination` to override per source |
 | `dataset_name=` | `[sources.<name>.dlt_ops].dataset`, or `[dlt_ops].default_dataset` project-wide |
-| cron / Makefile cadence | `[sources.<name>.dlt_ops].schedule` — a coarse tag, compiled by the orchestrator adapter |
+| cron / Makefile cadence | `[sources.<name>.dlt_ops].schedule` — a named tag, compiled by the orchestrator adapter. Use a built-in tag, or declare a name for your existing cron in [`[dlt_ops.schedules]`](../configuration/reference.md#dlt_opsschedules) |
 | `.dlt/secrets.toml` | Unchanged — dlt-ops reads secrets through dlt's own resolver |
 
 Add the source's section and its `dlt_ops` block to `.dlt/config.toml`:

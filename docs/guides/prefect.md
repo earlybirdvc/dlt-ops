@@ -47,14 +47,16 @@ Because the work is `dlt-ops pipeline run`, every dlt-ops guarantee holds — th
 
 ## One scheduled deployment per source
 
-**Fan out over `discover_sources()` and give each source its own cron deployment** — add this to the same `prefect_ingestion.py`, mapping the `schedule` tag to a cron expression you own:
+**Fan out over `discover_sources()` and give each source its own cron deployment** — add this to the same `prefect_ingestion.py`. Each built-in `schedule` tag maps to a cron expression you own, and a [declared schedule](../concepts/scheduling-and-orchestration.md#declared-schedules) brings its cron from `[dlt_ops.schedules]` in `.dlt/config.toml`:
 
 ```python title="prefect_ingestion.py"
+import tomllib
+
 from prefect import serve
 
 from dlt_ops import discover_sources
 
-# You own the preset -> cron mapping; dlt-ops keeps schedule tags coarse.
+# You own the cron of each built-in tag.
 TAG_TO_CRON = {
     "@hourly": "0 * * * *",
     "@2hourly": "0 */2 * * *",
@@ -63,15 +65,24 @@ TAG_TO_CRON = {
     "@monthly": "0 0 1 * *",
 }
 
+# A declared schedule brings its own cron from [dlt_ops.schedules].
+with (PROJECT_ROOT / ".dlt" / "config.toml").open("rb") as config_file:
+    DECLARED = tomllib.load(config_file).get("dlt_ops", {}).get("schedules", {})
+
+
+def cron_for(tag: str) -> str:
+    return DECLARED.get(tag) or TAG_TO_CRON[tag]
+
+
 if __name__ == "__main__":
     deployments = [
         ingest.to_deployment(
             name=f"ingest-{name}",
-            cron=TAG_TO_CRON[info.config.schedule.value],
+            cron=cron_for(info.config.schedule),
             parameters={"source": name},
         )
         for name, info in discover_sources(PROJECT_ROOT).items()
-        if info.config and info.config.schedule.value != "@manual"
+        if info.config and info.config.schedule != "@manual"
     ]
     serve(*deployments)
 ```

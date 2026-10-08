@@ -39,6 +39,9 @@ dependencies = [
     # framework, pydantic_fields helpers, and the init scaffold all import it
     # unconditionally.
     "pydantic",
+    # Validates the cron expressions of [dlt_ops.schedules]; the floor is the
+    # first release with `croniter.is_valid(..., strict=True)`.
+    "croniter>=6.2",
 ]
 
 [project.optional-dependencies]
@@ -128,6 +131,8 @@ dev = [
     "pytest>=7.0.0",
     "ruff",
     "pyrefly",
+    # Type stubs for the runtime croniter dependency, so pyrefly checks its calls.
+    "types-croniter>=6.2",
     "dlt[duckdb]",
     "duckdb",
     # SQL-database-as-source lane in tests/test_integration_flows.py

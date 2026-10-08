@@ -26,7 +26,7 @@ from dlt.common.runtime.run_context import switch_context
 import dlt_ops.discovery.runner as runner_mod
 from dlt_ops.config import UnresolvedDatasetError, UnresolvedDestinationError
 from dlt_ops.destinations import ADAPTER_GATED_FEATURES
-from dlt_ops.discovery.models import Schedule, SourceConfig, SourceInfo
+from dlt_ops.discovery.models import SourceConfig, SourceInfo
 from dlt_ops.discovery.runner import run_pipeline
 from dlt_ops.discovery.scanner import discover_sources
 from dlt_ops.preflight import MissingIncrementalCursorError, UnknownDestinationError
@@ -230,7 +230,7 @@ class TestResolution:
             default_dataset = "analytics"
             """
         )
-        config = SourceConfig(schedule=Schedule.DAILY, destination="duckdb", dataset="per_source_ds")
+        config = SourceConfig(schedule="@daily", destination="duckdb", dataset="per_source_ds")
         info = make_source_info("override_rows", simple_rows_source, config=config)
         pipeline = run_pipeline(info, project_root=root)
         assert pipeline.dataset_name == "per_source_ds"
@@ -239,7 +239,7 @@ class TestResolution:
     def test_explicit_arguments_beat_the_config_chain(self, make_project):
         """CLI --dataset (and a caller-supplied destination) outrank both config layers."""
         root = make_project(config=PROJECT_CONFIG)
-        config = SourceConfig(schedule=Schedule.DAILY, dataset="per_source_ds")
+        config = SourceConfig(schedule="@daily", dataset="per_source_ds")
         info = make_source_info("explicit_rows", simple_rows_source, config=config)
         pipeline = run_pipeline(info, project_root=root, destination="duckdb", dataset_name="explicit_ds")
         assert pipeline.dataset_name == "explicit_ds"

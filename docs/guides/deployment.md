@@ -25,7 +25,7 @@ from pathlib import Path
 from dlt_ops import discover_sources
 
 for name, info in discover_sources(Path(".")).items():
-    print(name, info.config.schedule.value)
+    print(name, info.config.schedule)
 ```
 
 ```text
@@ -33,7 +33,7 @@ github_events_api @hourly
 github_events_full @daily
 ```
 
-**The `schedule` tag is the cadence source of truth — but only the Airflow adapter reads it for you.** Every source declares one preset tag from a [closed set](../concepts/scheduling-and-orchestration.md) (`@hourly` through `@manual`); on cron and CI you mirror that tag into the trigger's own cron expression by hand, one trigger or matrix cadence per group. The orchestrators below turn the tag into their native scheduling syntax.
+**The `schedule` tag is the cadence source of truth — but only the Airflow adapter reads it for you.** Every source declares one [schedule tag](../concepts/scheduling-and-orchestration.md): a built-in name (`@hourly` through `@manual`) or a name the project declares with its own cron. On cron and CI, you copy that tag's cadence into the trigger's own cron expression by hand, with one trigger or matrix cadence per group. The orchestrators below turn the tag into their native scheduling syntax.
 
 ## The dev loop
 

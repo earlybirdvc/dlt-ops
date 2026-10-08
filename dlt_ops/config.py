@@ -1,4 +1,5 @@
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,7 @@ from dlt_ops._pipeline_names import (
     PIPELINE_NAME_TEMPLATE_KEY,
     validate_pipeline_name_template,
 )
+from dlt_ops._schedules import SCHEDULES_KEY, parse_declared_schedules
 from dlt_ops.discovery.models import SourceConfig
 from dlt_ops.plugins import set_disambiguation
 
@@ -46,6 +48,7 @@ _KNOWN_PROJECT_KEYS = frozenset(
         "staleness_days",
         "require_destination_adapter",
         PIPELINE_NAME_TEMPLATE_KEY,
+        SCHEDULES_KEY,
     }
 )
 
@@ -102,6 +105,9 @@ class ProjectConfig:
     - pipeline_name_template: how a source name becomes its dlt pipeline name
       (see dlt_ops._pipeline_names). An unusable value fails load_project_config
       rather than silently renaming pipelines.
+    - schedules: the project's own named schedules from [dlt_ops.schedules],
+      `"@name" = "<cron>"`. A source may name one in addition to the
+      built-in Schedule values. An invalid entry fails load_project_config.
     - raw: the whole table, so consumers of not-yet-parsed keys
       (load_timestamp_column, injected_columns, ...) read one source of truth.
     - unknown_keys: top-level keys the package does not understand. Surfaced
@@ -116,6 +122,7 @@ class ProjectConfig:
     alert_sink_options: dict[str, dict[str, Any]] = attrs.field(factory=dict)
     require_destination_adapter: bool = False
     pipeline_name_template: str = DEFAULT_PIPELINE_NAME_TEMPLATE
+    schedules: dict[str, str] = attrs.field(factory=dict)
     raw: dict[str, Any] = attrs.field(factory=dict)
     unknown_keys: tuple[str, ...] = ()
 
@@ -179,6 +186,21 @@ def load_raw_config(root: Path) -> dict[str, Any]:
     return _read_marker(root) or {}
 
 
+def load_declared_schedules(raw_config: Mapping[str, Any]) -> dict[str, str]:
+    """The validated [dlt_ops.schedules] table of a parsed config.toml; {} when absent.
+
+    Raises:
+        ProjectConfigError: an entry has an unusable name or cron expression.
+    """
+    table = raw_config.get("dlt_ops")
+    if not isinstance(table, dict):
+        return {}
+    try:
+        return parse_declared_schedules(table.get(SCHEDULES_KEY))
+    except ValueError as exc:
+        raise ProjectConfigError(f"[dlt_ops.{SCHEDULES_KEY}]: {exc}") from exc
+
+
 def load_project_config(root: Path) -> ProjectConfig:
     """Load and parse the [dlt_ops] table for a project root.
 
@@ -191,9 +213,11 @@ def load_project_config(root: Path) -> ProjectConfig:
         ProjectRootNotFoundError: root has no [dlt_ops] table.
         ProjectConfigParseError: broken TOML.
         ProjectConfigError: [dlt_ops.plugins] names an unknown plugin axis, or
-            pipeline_name_template cannot produce valid pipeline names.
+            pipeline_name_template cannot produce valid pipeline names, or
+            [dlt_ops.schedules] holds an invalid entry.
     """
-    table = load_raw_config(root).get("dlt_ops")
+    raw_config = load_raw_config(root)
+    table = raw_config.get("dlt_ops")
     if not isinstance(table, dict):
         raise ProjectRootNotFoundError(
             f"{root} is not a dlt-ops project root: {PROJECT_MARKER} has no [dlt_ops] table. {_INIT_HINT}"
@@ -232,6 +256,7 @@ def load_project_config(root: Path) -> ProjectConfig:
         ),
         require_destination_adapter=table.get("require_destination_adapter") is True,
         pipeline_name_template=raw_name_template,
+        schedules=load_declared_schedules(raw_config),
         raw=dict(table),
         unknown_keys=tuple(sorted(key for key in table if key not in _KNOWN_PROJECT_KEYS)),
     )
