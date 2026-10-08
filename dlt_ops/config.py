@@ -106,9 +106,8 @@ class ProjectConfig:
       (see dlt_ops._pipeline_names). An unusable value fails load_project_config
       rather than silently renaming pipelines.
     - schedules: the project's own named schedules from [dlt_ops.schedules],
-      `"@name" = "<cron>"` (see dlt_ops._schedules). A source may name one
-      in addition to the built-in Schedule values. An invalid entry fails
-      load_project_config.
+      `"@name" = "<cron>"`. A source may name one in addition to the
+      built-in Schedule values. An invalid entry fails load_project_config.
     - raw: the whole table, so consumers of not-yet-parsed keys
       (load_timestamp_column, injected_columns, ...) read one source of truth.
     - unknown_keys: top-level keys the package does not understand. Surfaced

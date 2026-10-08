@@ -92,8 +92,6 @@ class TestAcceptedSchedules:
 
 
 class TestRejectedSchedules:
-    """One test per condition; every other condition holds in each case."""
-
     @pytest.mark.parametrize("raw", [["@daily0200", VALID_CRON], VALID_CRON])
     def test_not_a_table(self, raw):
         with pytest.raises(ValueError, match="must be a table"):
@@ -300,8 +298,15 @@ class TestCli:
         assert "orders_api" in result.output
         assert "events_api" not in result.output
 
+    def test_list_json_filters_by_a_declared_schedule(self, runner, make_project):
+        root = _project(make_project, {"@daily0200": VALID_CRON}, orders_api="@daily0200", events_api="@daily")
+        argv = ["--root", str(root), "pipeline", "list", "--json", "--schedule", "@daily0200"]
+        result = runner.invoke(cli, argv)
+        assert result.exit_code == 0, result.output
+        assert [s["name"] for s in json.loads(result.stdout)] == ["orders_api"]
+
     def test_list_keeps_columns_aligned_for_a_long_declared_name(self, runner, make_project):
-        long_name = "@weekdays_0600_utc"  # longer than every built-in name
+        long_name = "@weekdays_0600_utc"
         root = _project(make_project, {long_name: VALID_CRON}, orders_api=long_name, events_api="@daily")
         result = runner.invoke(cli, ["--root", str(root), "pipeline", "list"])
         assert result.exit_code == 0, result.output

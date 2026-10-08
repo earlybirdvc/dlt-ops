@@ -97,7 +97,7 @@ Declare the source's config section and its `dlt_ops` block in `.dlt/config.toml
 # dlt-native source config (API base URL, auth key names) would go here.
 
 [sources.products.dlt_ops]
-schedule = "@daily"          # required — @hourly|@2hourly|@daily|@weekly|@monthly|@manual, or a declared name
+schedule = "@daily"          # required — @hourly|@2hourly|@daily|@weekly|@monthly|@manual, or a name from [dlt_ops.schedules]
 destination = "duckdb"       # optional; overrides default_destination
 dataset = "catalog_raw"      # optional; overrides default_dataset
 ```

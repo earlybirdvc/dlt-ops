@@ -76,7 +76,7 @@ schedule = "@daily0200"
 
 - **Name.** The whole name must match `@[A-Za-z0-9_.-]+`: `@` followed by letters, digits, `_`, `.` or `-`. The name without `@` becomes part of an orchestrator job id, for example the Airflow DAG id `dlt_daily0200`. A name cannot be a built-in name (`@hourly`, `@2hourly`, `@daily`, `@weekly`, `@monthly`, `@manual`), so the built-in schedules cannot be redefined.
 - **Cron expression.** A string with exactly five fields: minute, hour, day of month, month, day of week. Month and day names such as `MAR` and `FRI` are accepted. Presets such as `@daily`, forms with six or seven fields (seconds or year), and croniter's random `R` field are rejected. The expression must also pass croniter's strict check, which rejects out-of-range values, a step of `0`, and dates that never happen, such as February 30.
-- **Timezone.** A cron expression has no timezone of its own; the orchestrator reads it in its own timezone. The Airflow DAG factory reads it in the timezone of the DAG's `start_date`. The default `start_date` is 2024-01-01 in UTC, so by default the cron runs in UTC.
+- **Timezone.** A cron expression has no timezone of its own, so each orchestrator decides which timezone it runs in. Airflow runs it in the timezone of the DAG's `start_date`. The DAG factory's default `start_date` is 2024-01-01 in UTC, so by default the cron runs in UTC.
 
 An invalid entry is a `ProjectConfigError` raised when the project config loads. Its message starts with `[dlt_ops.schedules]:` and names the entry. Every `dlt-ops pipeline` command prints it as `Error: [dlt_ops.schedules]: ...` and exits 1, and the Airflow DAG factory and discovery raise it.
 

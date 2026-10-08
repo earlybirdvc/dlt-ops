@@ -53,8 +53,8 @@ class SourceConfig:
     """Config from config.toml for a source.
 
     All custom keys are under [sources.X.dlt_ops]:
-    - schedule: schedule name as a plain string, a built-in Schedule value
-      or a name declared in [dlt_ops.schedules]
+    - schedule: the schedule name as a plain string. It is a built-in
+      Schedule value or a name declared in [dlt_ops.schedules].
     - destination: per-source destination override; falls back to
       [dlt_ops].default_destination (see dlt_ops.config)
     - dataset: per-source dataset override; falls back to

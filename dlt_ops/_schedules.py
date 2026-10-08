@@ -19,7 +19,10 @@ SCHEDULES_KEY = "schedules"
 """The ``[dlt_ops]`` sub-table holding declared schedules — the single copy of this key name."""
 
 _NAME_RE = re.compile(r"@[A-Za-z0-9_.-]+")
-"""The name without ``@`` becomes part of an orchestrator job id, such as an Airflow DAG id, which allows only these."""
+"""The name without ``@`` becomes part of an orchestrator job id, such as an Airflow DAG id.
+
+An Airflow DAG id allows only letters, digits, ``_``, ``.`` and ``-``.
+"""
 
 _CRON_FIELD_COUNT = 5
 """Standard five-field cron. Presets such as ``@daily`` and croniter's seconds and year forms are rejected."""

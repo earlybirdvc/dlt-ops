@@ -66,6 +66,16 @@ def list_sources(ctx: click.Context, filter_schedule: str | None, output_json: b
     project_root = resolve_cli_project_root(ctx)
     sources = discover(project_root) if output_json else _discover_with_progress(project_root, discover)
 
+    if filter_schedule:
+        try:
+            declared = load_declared_schedules(load_raw_config(project_root))
+            target_schedule = resolve_schedule(filter_schedule, declared)
+        except ValueError as e:
+            click.echo(click.style(f"Error: {e}", fg="red"), err=True)
+            sys.exit(1)
+
+        sources = {name: src for name, src in sources.items() if src.config and src.config.schedule == target_schedule}
+
     # --json first: an empty project is `[]`, not the human "No sources found"
     # banner that a consumer piping to a parser cannot read.
     if output_json:
@@ -90,22 +100,10 @@ def list_sources(ctx: click.Context, filter_schedule: str | None, output_json: b
         click.echo(click.style("No sources found", fg="yellow"))
         return
 
-    # Filter by schedule if specified
-    if filter_schedule:
-        try:
-            declared = load_declared_schedules(load_raw_config(project_root))
-            target_schedule = resolve_schedule(filter_schedule, declared)
-        except ValueError as e:
-            click.echo(click.style(f"Error: {e}", fg="red"))
-            sys.exit(1)
-
-        sources = {name: src for name, src in sources.items() if src.config and src.config.schedule == target_schedule}
-
     click.echo()
     click.echo(click.style(f"Found {len(sources)} source(s)", fg="green", bold=True))
     click.echo()
 
-    # Header. Declared schedule names can be longer than the built-in ones.
     schedule_width = max([10, *(len(src.config.schedule) for src in sources.values() if src.config)])
     header = f"{'Name':<30} {'Pipeline':<15} {'Schedule':<{schedule_width}} {'Resources':<8}"
     click.echo(click.style(header, bold=True))

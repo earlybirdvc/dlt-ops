@@ -345,10 +345,11 @@ def validate_incremental_cursor_required(ctx: ValidationContext) -> list[Validat
     would buy visibility and no gate. Opting in is the decision; enforcing it
     is the point.
 
-    Scoped to sources whose config declares a recurring schedule (any schedule
-    but ``@manual``, declared ones included), because the harm is a full
-    refresh repeating on a cadence; ``@manual`` sources and
-    sources with no parsed config are out of scope. Reads the live resource
+    Scoped to sources whose config sets a recurring schedule, because the
+    harm is a full refresh repeating on a cadence. Every schedule except
+    ``@manual`` counts as recurring, including schedules from
+    [dlt_ops.schedules]. ``@manual`` sources and sources with no parsed
+    config are out of scope. Reads the live resource
     rather than the AST — ``apply_hints(incremental=...)`` and factory-built
     cursors are invisible to a source-text scan, and a false "no cursor" would
     be worse than the gap.

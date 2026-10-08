@@ -202,9 +202,6 @@ def _parse_source_config(
     All custom config keys are under [sources.X.dlt_ops]:
     - schedule, destination, dataset, airflow_var
 
-    ``declared`` holds the project's [dlt_ops.schedules] entries; a schedule
-    that is neither built-in nor declared gives ``None``.
-
     Only keys core itself acts on are parsed here (plus ``airflow_var``, which
     the CLI displays). Plugin-owned keys stay unparsed: a backend reads its own
     trigger keys off the raw ext table, so core never has to know them.
