@@ -102,7 +102,7 @@ def events(
 
 **Leave `allow_external_schedulers` unset on the incremental.** The runner turns it on when the run has an interval. A run without an interval, such as a local `pipeline run`, then falls back to the config values or the cursor's start value. If you set `allow_external_schedulers=True` yourself, that local run fails with `ExternalSchedulerNotAvailable`.
 
-**Runs without an interval always start from the same point.** No row carries the cursor field, so dlt never moves the cursor past `initial_value`. A run without an interval and without `incremental_start_value` therefore requests data from `initial_value` every time. To move the window forward, run the source on a schedule or as a [backfill](backfill.md), or pass a start value from config as `incremental_start_value`.
+**The cursor does not move forward between runs.** No row carries the cursor field, so dlt never moves the cursor past `initial_value`. A run without an interval and without `incremental_start_value` therefore starts from `initial_value` every time, moved earlier by any positive `lookback_hours`. To move the window forward, run the source on a schedule or as a [backfill](backfill.md), or pass a start value from config as `incremental_start_value`.
 
 ## The Airflow adapter
 
