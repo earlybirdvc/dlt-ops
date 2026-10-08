@@ -203,3 +203,13 @@ class TestRunnerWindow:
         info = make_source_info("window_plain", lambda: _window_source("window_plain", windows, 0))
         run_pipeline(info, project_root=root)
         assert windows == [(_EPOCH, None)]
+
+    def test_plain_runs_do_not_advance(self, make_project):
+        root = make_project(config=PROJECT_CONFIG)
+        windows: list[tuple[Any, Any]] = []
+        info = make_source_info("window_repeat", lambda: _window_source("window_repeat", windows, 0))
+        run_pipeline(info, project_root=root)
+        pipeline = run_pipeline(info, project_root=root)
+        assert windows == [(_EPOCH, None), (_EPOCH, None)]
+        stored = pipeline.state["sources"]["window_repeat"]["resources"]["events"]["incremental"][WINDOW_CURSOR_PATH]
+        assert stored["last_value"] == _EPOCH

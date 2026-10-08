@@ -82,7 +82,7 @@ import pendulum
 from dlt_ops import WINDOW_CURSOR_PATH, resolve_incremental_window
 
 
-@dlt.resource
+@dlt.resource(primary_key="id", write_disposition="merge")
 def events(
     cursor=dlt.sources.incremental(
         WINDOW_CURSOR_PATH,
@@ -98,9 +98,11 @@ def events(
 
 **Give `initial_value` as a datetime, not a string.** dlt cannot join a string-typed cursor to the run interval. With a string `initial_value`, a run that has an interval fails with `JoinSchedulerError` before the resource starts.
 
-**Use `lookback_hours`, not dlt's `lag=`, to overlap runs.** Rows can arrive late. `lookback_hours` moves `since` earlier by that many hours, so each run reads the end of the previous window again. dlt's `lag=` cannot do this here, because it does not move `start_value` when an external interval is set. The overlap reads some rows twice, so give the resource a primary key and the `merge` write disposition.
+**Use `lookback_hours`, not dlt's `lag=`, to overlap runs.** Rows can arrive late. `lookback_hours` moves `since` earlier by that many hours, so each run reads the end of the previous window again. dlt's `lag=` cannot do this here, because it does not move `start_value` when an external interval is set. The overlap reads some rows twice, so the example gives the resource a primary key and the `merge` write disposition.
 
 **Leave `allow_external_schedulers` unset on the incremental.** The runner turns it on when the run has an interval. A run without an interval, such as a local `pipeline run`, then falls back to the config values or the cursor's start value. If you set `allow_external_schedulers=True` yourself, that local run fails with `ExternalSchedulerNotAvailable`.
+
+**Runs without an interval always start from the same point.** No row carries the cursor field, so dlt never moves the cursor past `initial_value`. A run without an interval and without `incremental_start_value` therefore requests data from `initial_value` every time. To move the window forward, run the source on a schedule or as a [backfill](backfill.md), or pass a start value from config as `incremental_start_value`.
 
 ## The Airflow adapter
 
