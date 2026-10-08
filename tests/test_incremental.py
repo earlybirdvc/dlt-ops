@@ -171,6 +171,10 @@ class TestResolveIncrementalWindow:
         with pytest.raises(TypeError, match="start_value"):
             resolve_incremental_window(_cursor(100, 200))
 
+    def test_zero_cursor_end_still_counts_as_bounded(self):
+        with pytest.raises(TypeError, match="start_value"):
+            resolve_incremental_window(_cursor(-1, 0), "2024-02-01T00:00:00Z")
+
 
 def _window_source(name: str, windows: list[tuple[Any, Any]], lookback_hours: int):
     @dlt.resource(name="events")

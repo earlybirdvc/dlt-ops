@@ -63,7 +63,7 @@ def resolve_incremental_window(
         TypeError: A cursor bound is not a datetime, a date or a string, for
             example a number.
     """
-    if interval.end_value:
+    if interval.end_value is not None:
         since = _cursor_bound(interval.start_value, "start_value")
         until = _cursor_bound(interval.end_value, "end_value")
     elif incremental_start_value:

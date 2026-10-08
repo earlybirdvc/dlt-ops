@@ -96,7 +96,7 @@ def events(
 
 **The cursor names a field that no row contains.** With `on_cursor_value_missing="include"`, dlt keeps every row, so the incremental filters nothing and only carries the window. This works for rows yielded as Python dicts. For Arrow tables and dataframes, dlt requires the cursor column to exist, so this pattern does not work for them. `WINDOW_CURSOR_PATH` is a JSONPath, not a bare name, because dlt adds a bare cursor name to the table schema as a column. Once the table exists, the canonical freeze contract that dlt-ops applies ([`schema_contract_declared`](../configuration/rules.md#schema_contract_declared)) rejects that column and fails the run.
 
-**Give `initial_value` as a datetime, not a string.** dlt joins the run interval only when the cursor holds datetimes. With a string `initial_value`, a run that has an interval fails with `JoinSchedulerError` before the resource starts.
+**Give `initial_value` as a datetime, not a string.** dlt cannot join a string-typed cursor to the run interval. With a string `initial_value`, a run that has an interval fails with `JoinSchedulerError` before the resource starts.
 
 **Use `lookback_hours`, not dlt's `lag=`, to overlap runs.** Rows can arrive late. `lookback_hours` moves `since` earlier by that many hours, so each run reads the end of the previous window again. dlt's `lag=` cannot do this here, because it does not move `start_value` when an external interval is set. The overlap reads some rows twice, so give the resource a primary key and the `merge` write disposition.
 
